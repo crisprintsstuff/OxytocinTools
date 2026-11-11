@@ -33,7 +33,12 @@ class TrackerBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         self.db = await Database.open(self.config.database_path)
-        self.github = GitHubClient(self.config.github_token)
+        try:
+            self.github = GitHubClient(self.config.github_token,
+                                       app_id=self.config.github_app_id,
+                                       private_key=self.config.github_app_private_key)
+        except GitHubError as exc:
+            raise SystemExit(str(exc)) from exc
         await self.github.start()
         self.poller = Poller(self.db, self.github, self.deliver,
                              interval=self.config.poll_interval,
@@ -51,8 +56,9 @@ class TrackerBot(commands.Bot):
             synced = await self.tree.sync()
             log.info("Synced %d global commands (may take a while to appear)", len(synced))
 
-        if not self.config.github_token:
-            log.warning("GITHUB_TOKEN not set: limited to 60 GitHub requests/hour")
+        if self.github.auth_mode == "anonymous":
+            log.warning("No GitHub App or GITHUB_TOKEN configured: public repos only, "
+                        "60 requests/hour, and issues can't be created")
         self.poller.start()
 
     async def close(self) -> None:

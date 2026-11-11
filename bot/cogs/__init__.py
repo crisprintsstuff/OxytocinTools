@@ -56,6 +56,18 @@ async def resolve_tracked_repo(interaction: discord.Interaction, value: str) -> 
     return repo
 
 
+def access_hint(bot: "TrackerBot", full_name: str) -> str:
+    """Explain how to give the bot access to a repository, for the current auth mode."""
+    gh = bot.github
+    if gh.auth_mode == "app":
+        link = f" ([install it here]({gh.install_url}))" if gh.install_url else ""
+        return (f"Make sure the bot's GitHub App is installed on the account that owns "
+                f"**{full_name}** and has access to that repo{link}.")
+    if gh.auth_mode == "token":
+        return "If it's private, the bot's GitHub token needs access to it."
+    return "Private repos need a GitHub App to be configured for the bot."
+
+
 def missing_channel_perms(channel: discord.abc.GuildChannel) -> list[str]:
     me = channel.guild.me
     perms = channel.permissions_for(me)

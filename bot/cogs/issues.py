@@ -13,7 +13,7 @@ from ..checks import UserError, can_create_issue, is_admin
 from ..embeds import GREEN, truncate
 from ..github import GitHubError, NotFound
 from ..models import Repo
-from . import resolve_tracked_repo
+from . import access_hint, resolve_tracked_repo
 
 if TYPE_CHECKING:
     from ..main import TrackerBot
@@ -166,14 +166,19 @@ class Issues(commands.GroupCog, group_name="issue",
         try:
             issue = await self.bot.github.create_issue(repo.owner, repo.name, title, full_body, labels)
         except NotFound:
-            raise UserError(f"The bot's GitHub account can't see **{repo.full_name}**. "
-                            "Its token needs access to this repository.")
+            raise UserError(f"The bot can't see **{repo.full_name}** on GitHub. "
+                            + access_hint(self.bot, repo.full_name))
         except GitHubError as exc:
             if exc.status == 410:
                 raise UserError(f"Issues are turned off for **{repo.full_name}** on GitHub.")
-            if exc.status == 403:
-                raise UserError(f"The bot's GitHub token isn't allowed to create issues in "
-                                f"**{repo.full_name}**. It needs *Issues: Read and write* access.")
+            if exc.status in (401, 403):
+                if self.bot.github.auth_mode == "anonymous":
+                    raise UserError("Creating issues needs a GitHub App to be configured for the bot.")
+                raise UserError(
+                    f"The bot isn't allowed to create issues in **{repo.full_name}**. "
+                    "Its GitHub App needs the *Issues: Read and write* permission, and the "
+                    "new permission must be accepted on the installation. "
+                    + access_hint(self.bot, repo.full_name))
             raise
         self._last_issue[(interaction.guild_id or 0, user.id)] = time.monotonic()
         log.info("User %s created issue %s#%s", user.id, repo.full_name, issue["number"])

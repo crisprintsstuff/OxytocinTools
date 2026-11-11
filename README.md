@@ -32,31 +32,57 @@ pre-releases to `#beta-testers`, `v2.*` tags to `#v2`, and so on.
    That grants View Channels, Send Messages, Embed Links and Mention All Roles.
    Mention All Roles is only needed to ping roles that aren't set as mentionable.
 
-### 2. Create a GitHub account and token for the bot (recommended)
+### 2. Create a GitHub App (recommended)
 
-Without a token GitHub allows only 60 requests/hour, and issues can't be created.
+A GitHub App is how the bot reads your repos and creates issues. You install it once on
+your account and it covers all your repos, public and private, including ones you create
+later. No per-repo invites are needed. Issues it creates show as opened by
+**`your-app-name[bot]`**, with a footer naming the Discord user who reported them.
 
-Issues created from Discord show the token's owner as their author. So **create a separate
-GitHub account for the bot** (for example `myorg-bot`) instead of using your personal one.
-Every issue also gets a footer naming the Discord user who reported it.
+1. Go to **GitHub → Settings → Developer settings → GitHub Apps → New GitHub App**
+   (<https://github.com/settings/apps/new>). For an organization, use the org's
+   **Settings → Developer settings → GitHub Apps** instead.
+2. Fill in:
+   - **GitHub App name**: anything unique, e.g. `oxytocin-tracker`. Issues show as `oxytocin-tracker[bot]`.
+   - **Homepage URL**: anything, e.g. this repo's URL.
+   - **Webhook**: **uncheck "Active"**. The bot polls, so it doesn't need webhooks.
+   - **Repository permissions**:
+     | Permission | Access |
+     |---|---|
+     | Contents | Read-only (releases and commits) |
+     | Issues | **Read and write** (Read-only if you don't want issue creation) |
+     | Pull requests | Read-only |
+     | Metadata | Read-only (selected automatically) |
+   - **Where can this GitHub App be installed?** **Only on this account**.
+3. Click **Create GitHub App**. On the next page:
+   - Note the **App ID** near the top.
+   - Scroll to **Private keys**, click **Generate a private key**, and save the downloaded
+     `.pem` file as `data/github-app.pem` in the bot's folder. Keep it secret: it's ignored by git.
+4. In the left sidebar click **Install App**, then **Install** next to your account. Choose
+   **All repositories**, or pick specific ones.
+5. Put the App ID in `.env` as `GITHUB_APP_ID`. `GITHUB_APP_PRIVATE_KEY_PATH` already defaults to
+   `data/github-app.pem`.
 
-1. Sign up for the bot account and give it access to your repos. For private repos,
-   add it as a collaborator. **Triage** role or higher lets it apply labels too.
-2. Signed in as the bot account, create a
-   [fine-grained token](https://github.com/settings/personal-access-tokens) for the repos
-   you track, with these repository permissions:
-   - **Metadata**: read
-   - **Contents**: read
-   - **Pull requests**: read
-   - **Issues**: read **and write** (read-only is enough if you don't want issue creation)
+Repos owned by other people or organizations, where your app isn't installed, can still be
+tracked if they're public. The bot reads them anonymously, which is limited to 60 requests/hour,
+or with `GITHUB_TOKEN` if you set one (5000/hour; a classic token with no scopes is enough).
+You can't create issues in those repos.
 
-   Repos owned by an organization: set the token's *Resource owner* to the organization.
-   The organization may need to approve fine-grained tokens first.
+If you later add a permission to the app, GitHub asks you to approve the change on the
+installation (**Settings → Applications → Installed GitHub Apps → Configure**) before it takes effect.
+
+<details>
+<summary>Not using an app?</summary>
+
+Set only `GITHUB_TOKEN`, using a classic token. Issues will be opened as the token's owner,
+and the token only reaches repos that account owns or collaborates on. Fine-grained tokens
+can't write to repos owned by another account.
+</details>
 
 ### 3. Configure and run
 
 ```bash
-cp .env.example .env      # fill in DISCORD_TOKEN and GITHUB_TOKEN
+cp .env.example .env      # fill in DISCORD_TOKEN and GITHUB_APP_ID
 pip install -r requirements.txt
 python -m bot
 ```
@@ -64,7 +90,7 @@ python -m bot
 Or with Docker:
 
 ```bash
-cp .env.example .env
+cp .env.example .env      # and put the key at data/github-app.pem
 docker compose up -d --build
 ```
 
@@ -74,7 +100,10 @@ set `DEV_GUILD_ID` to your server's ID so they sync instantly.
 | Variable        | Default           | Description                                         |
 |-----------------|-------------------|-----------------------------------------------------|
 | `DISCORD_TOKEN` | *(required)*      | Bot token                                           |
-| `GITHUB_TOKEN`  | *(none)*          | GitHub token for higher rate limits and private repos |
+| `GITHUB_APP_ID` | *(none)*          | GitHub App ID (recommended)                         |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | `data/github-app.pem` | App private key file              |
+| `GITHUB_APP_PRIVATE_KEY` | *(none)* | The key inline, with `\n` for line breaks, instead of a file |
+| `GITHUB_TOKEN`  | *(none)*          | Optional personal token: fallback for repos without the app |
 | `POLL_INTERVAL` | `300`             | Seconds between checks (minimum 60)                 |
 | `DATABASE_PATH` | `data/tracker.db` | SQLite file location                                |
 | `BOT_OWNER_IDS` | *(none)*          | Comma-separated user IDs with admin rights everywhere |
@@ -136,8 +165,8 @@ Safeguards:
   GitHub users or teams through the bot.
 - Every issue ends with "Reported from Discord by **name** (`username`) in **server** #channel".
 
-GitHub only applies labels if the bot's account has Triage access or higher. If any labels
-weren't applied, the confirmation message says which ones.
+Issues can only be created in repos where the GitHub App is installed. If GitHub doesn't
+apply some of the labels someone typed, the confirmation message says which ones.
 
 ### Administration — `/admin`
 | Command | Description |
@@ -184,6 +213,9 @@ its filters, oldest first.
 - If the bot loses access to a channel, or the channel is deleted, the route is paused and
   the error appears in `/route list` and `/admin status`.
 - If the bot is removed from a server, that server's configuration is deleted.
+- **Authentication:** for each repo the bot uses the GitHub App's installation token if the
+  app is installed on that repo. Otherwise it uses `GITHUB_TOKEN`, or anonymous access.
+  Each has its own rate limit (installations get 5000+/hour), and `/admin status` shows them all.
 
 ## Development
 

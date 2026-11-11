@@ -16,7 +16,6 @@ async def gh(aiohttp_server_factory):
 
 @pytest.fixture
 async def aiohttp_server_factory():
-    state = {"limited": False}
 
     async def releases(request):
         assert request.headers["Authorization"] == "Bearer tok"
@@ -63,7 +62,7 @@ async def aiohttp_server_factory():
 async def test_etag_drafts_and_rate_tracking(gh):
     items, etag = await gh.fetch_stream("o", "r", "releases")
     assert [i["id"] for i in items] == [1] and etag == '"v1"'
-    assert gh.rate_remaining == 4999
+    assert gh.rate_limits["token"].remaining == 4999
     assert await gh.fetch_stream("o", "r", "releases", etag) == (None, etag)
 
 

@@ -116,10 +116,11 @@ async def test_submit_creates_issue_and_enforces_cooldown(db):
 
 async def test_submit_permission_errors(db):
     repo = await db.add_repo(1, "o", "r", "main", None)
-    github = SimpleNamespace(create_issue=AsyncMock(side_effect=GitHubError("no", 403)))
+    github = SimpleNamespace(create_issue=AsyncMock(side_effect=GitHubError("no", 403)),
+                             auth_mode="app", install_url="https://github.com/apps/x/installations/new")
     cog = Issues.__new__(Issues)
     cog.bot, cog._last_issue = interaction(db, member(), github=github).client, {}
     with pytest.raises(UserError, match="Only bot admins"):
         await cog.submit(interaction(db, member(), github=github), repo, "T", "", "", None)
-    with pytest.raises(UserError, match="Issues: Read and write"):
+    with pytest.raises(UserError, match=r"Issues: Read and write.*install it here"):
         await cog.submit(interaction(db, member(manage=True), github=github), repo, "T", "", "", None)

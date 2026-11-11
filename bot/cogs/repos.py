@@ -12,7 +12,7 @@ from ..checks import UserError, bot_admin
 from ..embeds import release_embed, truncate
 from ..github import GitHubError, NotFound
 from ..models import parse_repo
-from . import ConfirmView, missing_channel_perms, repo_autocomplete, resolve_tracked_repo
+from . import ConfirmView, access_hint, missing_channel_perms, repo_autocomplete, resolve_tracked_repo
 
 if TYPE_CHECKING:
     from ..main import TrackerBot
@@ -44,10 +44,8 @@ class Repos(commands.GroupCog, group_name="repo", group_description="Track GitHu
         try:
             data = await self.bot.github.get_repo(owner, name)
         except NotFound:
-            raise UserError(
-                f"Couldn't find `{owner}/{name}` on GitHub. If it's private, the bot's "
-                "GitHub token needs access to it."
-            )
+            raise UserError(f"Couldn't find `{owner}/{name}` on GitHub. "
+                            + access_hint(self.bot, f"{owner}/{name}"))
         owner, name = data["owner"]["login"], data["name"]  # canonical casing
         try:
             tracked = await self.bot.db.add_repo(interaction.guild.id, owner, name,
@@ -128,7 +126,8 @@ class Repos(commands.GroupCog, group_name="repo", group_description="Track GitHu
         try:
             release = await self.bot.github.latest_release(owner, name, include_prereleases)
         except NotFound:
-            raise UserError(f"Couldn't find `{owner}/{name}` on GitHub.")
+            raise UserError(f"Couldn't find `{owner}/{name}` on GitHub. "
+                            + access_hint(self.bot, f"{owner}/{name}"))
         if release is None:
             await interaction.followup.send(f"`{owner}/{name}` has no published releases.")
             return
@@ -145,7 +144,8 @@ class Repos(commands.GroupCog, group_name="repo", group_description="Track GitHu
         try:
             data = await self.bot.github.get_repo(owner, name)
         except NotFound:
-            raise UserError(f"Couldn't find `{owner}/{name}` on GitHub.")
+            raise UserError(f"Couldn't find `{owner}/{name}` on GitHub. "
+                            + access_hint(self.bot, f"{owner}/{name}"))
         embed = discord.Embed(title=data["full_name"], url=data["html_url"],
                               description=data.get("description") or "",
                               color=discord.Color.dark_grey())

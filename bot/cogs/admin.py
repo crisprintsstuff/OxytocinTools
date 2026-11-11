@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -112,13 +111,25 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
         embed.add_field(name="Polling",
                         value=f"Every {poller.interval}s\nLast: {last}\nNext: {nxt}\n"
                               f"Feeds (all servers): {poller.last_stream_count}")
-        if gh.rate_remaining is not None:
-            reset = discord.utils.format_dt(_dt(gh.rate_reset or time.time()), "R")
-            rate = f"{gh.rate_remaining}/{gh.rate_limit} left, resets {reset}"
+        if gh.auth_mode == "app":
+            auth = f"GitHub App `{gh.app_slug or gh.app.app_id}`"  # type: ignore[union-attr]
+            if gh.install_url:
+                auth += f" ([install]({gh.install_url}))"
+            if gh.token:
+                auth += "\nFallback: personal token"
+        elif gh.auth_mode == "token":
+            auth = "Personal access token"
         else:
-            rate = "no requests yet"
+            auth = "**None**: public repos only, 60 req/h, no issue creation"
+        names = {"anonymous": "Anonymous", "token": "Token", "app": "App"}
+        rates = []
+        for bucket, rl in sorted(gh.rate_limits.items()):
+            label = "Installation " + bucket.split(":", 1)[1] if bucket.startswith("installation:") \
+                else names.get(bucket, bucket)
+            rates.append(f"{label}: {rl.remaining}/{rl.limit}, resets {discord.utils.format_dt(_dt(rl.reset), 'R')}")
         embed.add_field(name="GitHub API",
-                        value=f"Token: {'yes' if gh.token else '**no** (60 req/h)'}\n{rate}")
+                        value=(auth + "\n" + ("\n".join(rates) or "No requests yet"))[:1024],
+                        inline=False)
 
         default, issue_role = await bot.db.get_issue_settings(interaction.guild.id)
         overrides = [f"{r.full_name}: {ISSUE_ACCESS_LABELS[r.issue_access]}"

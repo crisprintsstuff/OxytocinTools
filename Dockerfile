@@ -1,8 +1,9 @@
 FROM python:3.12-slim
 WORKDIR /app
-ENV PYTHONUNBUFFERED=1 DATABASE_PATH=/data/tracker.db
+ENV PYTHONUNBUFFERED=1
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY bot ./bot
-VOLUME /data
+# Database and the GitHub App private key live here (see docker-compose.yml).
+VOLUME /app/data
 CMD ["python", "-m", "bot"]

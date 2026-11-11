@@ -90,15 +90,20 @@ class Poller:
                 if key not in groups:
                     await self.db.delete_stream(*key)
 
+            rate_limited = 0
             for (repo_key, stream), stream_routes in groups.items():
                 try:
                     await self._poll_stream(repo_key, stream, stream_routes)
-                except RateLimited as exc:
-                    log.warning("%s; skipping the rest of this cycle", exc)
-                    break
+                except RateLimited:
+                    # Limits are per credential (app installation, token, anonymous), so
+                    # keep going: other feeds may use other credentials. Exhausted ones
+                    # fail instantly without making a request.
+                    rate_limited += 1
                 except Exception:
                     log.exception("Failed polling %s %s", repo_key, stream)
 
+            if rate_limited:
+                log.warning("Skipped %d feed(s) this cycle due to GitHub rate limits", rate_limited)
             self.last_stream_count = len(groups)
             self.last_run = time.time()
             self.last_duration = time.monotonic() - started
