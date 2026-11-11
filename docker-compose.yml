@@ -1,0 +1,7 @@
+services:
+  tracker:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data   # tracker.db and github-app.pem
+    restart: unless-stopped
