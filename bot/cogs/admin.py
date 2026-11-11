@@ -8,10 +8,16 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from ..checks import bot_admin
+from ..checks import UserError, bot_admin
+from ..models import ISSUE_ACCESS_LABELS
+from . import repo_autocomplete, resolve_tracked_repo
 
 if TYPE_CHECKING:
     from ..main import TrackerBot
+
+ACCESS_CHOICES = [app_commands.Choice(name=label, value=key)
+                  for key, label in ISSUE_ACCESS_LABELS.items()]
+ACCESS_CHOICES.append(app_commands.Choice(name="Use server default (repo only)", value="inherit"))
 
 
 def _dt(ts: float) -> datetime:
@@ -42,6 +48,49 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
             "✅ Admin role cleared. Only members with **Manage Server** can use admin commands now.",
             ephemeral=True)
 
+    @app_commands.command(name="issue-access",
+                          description="Choose who can create GitHub issues from Discord")
+    @app_commands.describe(level="Who may create issues",
+                           repo="Only change this repository (leave empty for the server default)")
+    @app_commands.choices(level=ACCESS_CHOICES)
+    @app_commands.autocomplete(repo=repo_autocomplete)
+    @bot_admin()
+    async def issue_access(self, interaction: discord.Interaction,
+                           level: app_commands.Choice[str], repo: str | None = None) -> None:
+        assert interaction.guild is not None
+        db = self.bot.db
+        if repo:
+            tracked = await resolve_tracked_repo(interaction, repo)
+            await db.set_repo_issue_access(tracked.id, None if level.value == "inherit" else level.value)
+            target = f"**{tracked.full_name}**"
+        else:
+            if level.value == "inherit":
+                raise UserError("`Use server default` only applies when you pick a repository.")
+            await db.set_issue_access(interaction.guild.id, level.value)
+            target = "this server (repos without their own setting)"
+
+        default, role_id = await db.get_issue_settings(interaction.guild.id)
+        msg = f"✅ Issue creation for {target}: **{level.name}**."
+        effective = default if level.value == "inherit" else level.value
+        if effective == "role" and role_id is None:
+            msg += "\n⚠️ No issue role is set yet, so only admins can create issues. Use `/admin issue-role`."
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @app_commands.command(name="issue-role",
+                          description="Set the role allowed to create issues (leave empty to clear)")
+    @bot_admin()
+    async def issue_role(self, interaction: discord.Interaction,
+                         role: discord.Role | None = None) -> None:
+        assert interaction.guild is not None
+        await self.bot.db.set_issue_role(interaction.guild.id, role.id if role else None)
+        if role:
+            msg = (f"✅ Members with {role.mention} can create issues in repos whose access is "
+                   "**Bot admins + the issue role**.")
+        else:
+            msg = "✅ Issue role cleared."
+        await interaction.response.send_message(msg, ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
+
     @app_commands.command(name="status", description="Show polling and GitHub API status")
     @bot_admin()
     async def status(self, interaction: discord.Interaction) -> None:
@@ -70,6 +119,16 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
             rate = "no requests yet"
         embed.add_field(name="GitHub API",
                         value=f"Token: {'yes' if gh.token else '**no** (60 req/h)'}\n{rate}")
+
+        default, issue_role = await bot.db.get_issue_settings(interaction.guild.id)
+        overrides = [f"{r.full_name}: {ISSUE_ACCESS_LABELS[r.issue_access]}"
+                     for r in repos if r.issue_access]
+        issue_info = (f"Default: {ISSUE_ACCESS_LABELS.get(default, default)}\n"
+                      f"Issue role: {f'<@&{issue_role}>' if issue_role else 'none'}\n"
+                      f"Cooldown: {bot.config.issue_cooldown}s (admins exempt)")
+        if overrides:
+            issue_info += "\nOverrides:\n" + "\n".join(overrides)
+        embed.add_field(name="Issue creation", value=issue_info[:1024], inline=False)
 
         problems = []
         for r in routes:

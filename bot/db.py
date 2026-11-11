@@ -10,7 +10,9 @@ from .models import Repo, Route
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS guild_settings (
     guild_id      INTEGER PRIMARY KEY,
-    admin_role_id INTEGER
+    admin_role_id INTEGER,
+    issue_access  TEXT NOT NULL DEFAULT 'admins',
+    issue_role_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS repos (
@@ -19,6 +21,7 @@ CREATE TABLE IF NOT EXISTS repos (
     owner          TEXT    NOT NULL,
     name           TEXT    NOT NULL,
     default_branch TEXT    NOT NULL DEFAULT 'main',
+    issue_access   TEXT,                 -- NULL = use the server default
     added_by       INTEGER,
     added_at       TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -61,6 +64,17 @@ CREATE TABLE IF NOT EXISTS seen_items (
 );
 """
 
+# Columns added after the first release; applied to existing databases on startup.
+MIGRATIONS = {
+    "guild_settings": {
+        "issue_access": "TEXT NOT NULL DEFAULT 'admins'",
+        "issue_role_id": "INTEGER",
+    },
+    "repos": {"issue_access": "TEXT"},
+}
+
+_REPO_COLUMNS = "id, guild_id, owner, name, default_branch, issue_access"
+
 _ROUTE_SELECT = """
 SELECT r.id, r.repo_id, p.guild_id, p.owner, p.name, r.channel_id, r.event_type,
        r.release_kind, r.tag_pattern, r.branch, r.mention_role_id, r.crosspost,
@@ -92,6 +106,12 @@ class Database:
         await conn.execute("PRAGMA foreign_keys = ON")
         await conn.execute("PRAGMA journal_mode = WAL")
         await conn.executescript(SCHEMA)
+        for table, columns in MIGRATIONS.items():
+            async with conn.execute(f"PRAGMA table_info({table})") as cur:
+                existing = {row[1] for row in await cur.fetchall()}
+            for column, decl in columns.items():
+                if column not in existing:
+                    await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
         await conn.commit()
         return cls(conn)
 
@@ -114,6 +134,30 @@ class Database:
         )
         await self.conn.commit()
 
+    async def get_issue_settings(self, guild_id: int) -> tuple[str, int | None]:
+        """Return the server's default issue access level and issue role."""
+        async with self.conn.execute(
+            "SELECT issue_access, issue_role_id FROM guild_settings WHERE guild_id = ?", (guild_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return (row[0], row[1]) if row else ("admins", None)
+
+    async def set_issue_access(self, guild_id: int, level: str) -> None:
+        await self.conn.execute(
+            "INSERT INTO guild_settings (guild_id, issue_access) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET issue_access = excluded.issue_access",
+            (guild_id, level),
+        )
+        await self.conn.commit()
+
+    async def set_issue_role(self, guild_id: int, role_id: int | None) -> None:
+        await self.conn.execute(
+            "INSERT INTO guild_settings (guild_id, issue_role_id) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET issue_role_id = excluded.issue_role_id",
+            (guild_id, role_id),
+        )
+        await self.conn.commit()
+
     async def delete_guild(self, guild_id: int) -> None:
         await self.conn.execute("DELETE FROM repos WHERE guild_id = ?", (guild_id,))
         await self.conn.execute("DELETE FROM guild_settings WHERE guild_id = ?", (guild_id,))
@@ -132,7 +176,7 @@ class Database:
 
     async def get_repo(self, guild_id: int, owner: str, name: str) -> Repo | None:
         async with self.conn.execute(
-            "SELECT id, guild_id, owner, name, default_branch FROM repos "
+            f"SELECT {_REPO_COLUMNS} FROM repos "
             "WHERE guild_id = ? AND lower(owner) = lower(?) AND lower(name) = lower(?)",
             (guild_id, owner, name),
         ) as cur:
@@ -141,11 +185,15 @@ class Database:
 
     async def list_repos(self, guild_id: int) -> list[Repo]:
         async with self.conn.execute(
-            "SELECT id, guild_id, owner, name, default_branch FROM repos "
+            f"SELECT {_REPO_COLUMNS} FROM repos "
             "WHERE guild_id = ? ORDER BY lower(owner), lower(name)",
             (guild_id,),
         ) as cur:
             return [Repo(*row) for row in await cur.fetchall()]
+
+    async def set_repo_issue_access(self, repo_id: int, level: str | None) -> None:
+        await self.conn.execute("UPDATE repos SET issue_access = ? WHERE id = ?", (level, repo_id))
+        await self.conn.commit()
 
     async def remove_repo(self, repo_id: int) -> None:
         await self.conn.execute("DELETE FROM repos WHERE id = ?", (repo_id,))

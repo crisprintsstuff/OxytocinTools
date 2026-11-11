@@ -17,7 +17,7 @@ from .poller import Poller
 
 log = logging.getLogger("bot")
 
-EXTENSIONS = ("bot.cogs.repos", "bot.cogs.routes", "bot.cogs.admin")
+EXTENSIONS = ("bot.cogs.repos", "bot.cogs.routes", "bot.cogs.admin", "bot.cogs.issues")
 
 
 class TrackerBot(commands.Bot):

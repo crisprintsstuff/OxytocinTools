@@ -21,6 +21,7 @@ class Config:
     owner_ids: set[int] = field(default_factory=set)
     dev_guild_id: int | None = None
     log_level: str = "INFO"
+    issue_cooldown: int = 60
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -37,4 +38,5 @@ class Config:
             owner_ids=_int_list(os.getenv("BOT_OWNER_IDS")),
             dev_guild_id=int(dev_guild) if dev_guild else None,
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+            issue_cooldown=max(0, int(os.getenv("ISSUE_COOLDOWN", "60") or 60)),
         )

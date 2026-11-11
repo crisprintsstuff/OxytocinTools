@@ -1,3 +1,5 @@
+import discord
+
 from bot.config import Config
 from bot.embeds import build_embeds
 from bot.main import EXTENSIONS, TrackerBot
@@ -30,11 +32,15 @@ async def test_all_commands_register():
     bot = TrackerBot(Config(discord_token="x"))
     for ext in EXTENSIONS:
         await bot.load_extension(ext)
-    groups = {g.name: sorted(c.name for c in g.commands) for g in bot.tree.get_commands()}
+    groups = {g.name: sorted(c.name for c in getattr(g, "commands", [])) for g in bot.tree.get_commands()}
+    menu = bot.tree.get_command("Create GitHub issue", type=discord.AppCommandType.message)
+    assert menu is not None and menu.guild_only
     assert groups == {
         "repo": ["info", "latest", "list", "track", "untrack"],
         "route": ["add", "list", "remove", "test", "toggle"],
-        "admin": ["check-now", "clear-role", "set-role", "status"],
+        "admin": ["check-now", "clear-role", "issue-access", "issue-role", "set-role", "status"],
+        "issue": ["create"],
+        "Create GitHub issue": [],
     }
     # Payloads must serialise (catches invalid option definitions).
     for cmd in bot.tree.get_commands():

@@ -71,11 +71,16 @@ class GitHubClient:
     async def _get(self, path: str, params: dict[str, Any] | None = None,
                    etag: str | None = None) -> tuple[int, Any, str | None]:
         """GET a path. Returns (status, json, etag); status 304 means unchanged."""
+        return await self._request("GET", path, params=params, etag=etag)
+
+    async def _request(self, method: str, path: str, *, params: dict[str, Any] | None = None,
+                       json: Any = None, etag: str | None = None) -> tuple[int, Any, str | None]:
         assert self.session is not None, "GitHubClient.start() was not called"
         if (reset := self.rate_limited_until) is not None:
             raise RateLimited(reset)
         headers = {"If-None-Match": etag} if etag else {}
-        async with self.session.get(self.base_url + path, params=params, headers=headers) as resp:
+        async with self.session.request(method, self.base_url + path, params=params, json=json,
+                                        headers=headers) as resp:
             self._record_rate_limit(resp)
             if resp.status == 304:
                 return 304, None, etag
@@ -106,6 +111,15 @@ class GitHubClient:
     # ----------------------------------------------------------------- endpoints
     async def get_repo(self, owner: str, name: str) -> dict[str, Any]:
         _, data, _ = await self._get(f"/repos/{owner}/{name}")
+        return data
+
+    async def create_issue(self, owner: str, name: str, title: str, body: str,
+                           labels: list[str] | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"title": title, "body": body}
+        if labels:
+            # GitHub silently drops labels unless the token's account has triage access.
+            payload["labels"] = labels
+        _, data, _ = await self._request("POST", f"/repos/{owner}/{name}/issues", json=payload)
         return data
 
     async def get_branch(self, owner: str, name: str, branch: str) -> dict[str, Any]:

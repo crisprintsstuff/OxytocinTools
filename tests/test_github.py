@@ -34,7 +34,14 @@ async def aiohttp_server_factory():
         return web.json_response({"message": "API rate limit exceeded"}, status=403, headers={
             "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(int(time.time()) + 100)})
 
+    async def create_issue(request):
+        payload = await request.json()
+        return web.json_response({"number": 7, "title": payload["title"],
+                                  "labels": [{"name": n} for n in payload.get("labels", [])]},
+                                 status=201)
+
     app = web.Application()
+    app.router.add_post("/repos/o/r/issues", create_issue)
     app.router.add_get("/repos/o/r/releases", releases)
     app.router.add_get("/repos/o/r/issues", issues)
     app.router.add_get("/repos/o/limited/releases", limited)
@@ -72,3 +79,8 @@ async def test_not_found_and_rate_limit(gh):
         await gh.fetch_stream("o", "limited", "releases")
     with pytest.raises(RateLimited):  # short-circuits without another request
         await gh.fetch_stream("o", "r", "releases")
+
+
+async def test_create_issue(gh):
+    issue = await gh.create_issue("o", "r", "Title", "Body", ["bug"])
+    assert issue["number"] == 7 and issue["labels"] == [{"name": "bug"}]

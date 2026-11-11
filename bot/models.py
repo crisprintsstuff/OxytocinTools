@@ -8,6 +8,14 @@ from typing import Any
 EVENT_TYPES = ("releases", "commits", "issues", "pulls")
 RELEASE_KINDS = ("all", "stable", "prerelease")
 
+# Who may create GitHub issues from Discord.
+ISSUE_ACCESS_LABELS = {
+    "disabled": "Nobody (disabled)",
+    "admins": "Bot admins only",
+    "role": "Bot admins + the issue role",
+    "everyone": "Everyone",
+}
+
 EVENT_LABELS = {
     "releases": "Releases",
     "commits": "Commits",
@@ -63,6 +71,7 @@ class Repo:
     owner: str
     name: str
     default_branch: str
+    issue_access: str | None = None  # None = use the server default
 
     @property
     def full_name(self) -> str:

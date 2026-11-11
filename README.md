@@ -1,13 +1,15 @@
 # OxytocinTools — GitHub Repo Tracker for Discord
 
 A Discord bot that watches your GitHub repositories and posts **releases, commits,
-issues, and pull requests** to the channels you choose. Routing rules let you send
+issues, and pull requests** to the channels you choose, and lets your community
+**create GitHub issues straight from Discord**. Routing rules let you send
 specific releases to specific channels: stable releases to `#announcements`,
 pre-releases to `#beta-testers`, `v2.*` tags to `#v2`, and so on.
 
 - Slash commands, with autocomplete for tracked repos and routes
 - Per-route filters: stable vs. pre-release, tag pattern (glob or regex), and branch for commits
 - Optional role ping per route, and auto-publish in announcement channels
+- Create issues with `/issue create` or by right-clicking a message, with configurable access and a cooldown
 - Admin permissions: **Manage Server**, a configurable bot admin role, or owner IDs
 - Works across many servers; each GitHub feed is fetched once per cycle no matter how many servers use it
 - Uses GitHub ETags, so unchanged feeds don't count against your API rate limit
@@ -30,12 +32,26 @@ pre-releases to `#beta-testers`, `v2.*` tags to `#v2`, and so on.
    That grants View Channels, Send Messages, Embed Links and Mention All Roles.
    Mention All Roles is only needed to ping roles that aren't set as mentionable.
 
-### 2. Create a GitHub token (recommended)
+### 2. Create a GitHub account and token for the bot (recommended)
 
-Without a token GitHub allows only 60 requests/hour. Create a
-[fine-grained token](https://github.com/settings/personal-access-tokens) with read-only
-**Contents**, **Issues**, **Pull requests** and **Metadata** access to the repos you track.
-For public repos only, a token with no permissions is enough.
+Without a token GitHub allows only 60 requests/hour, and issues can't be created.
+
+Issues created from Discord show the token's owner as their author. So **create a separate
+GitHub account for the bot** (for example `myorg-bot`) instead of using your personal one.
+Every issue also gets a footer naming the Discord user who reported it.
+
+1. Sign up for the bot account and give it access to your repos. For private repos,
+   add it as a collaborator. **Triage** role or higher lets it apply labels too.
+2. Signed in as the bot account, create a
+   [fine-grained token](https://github.com/settings/personal-access-tokens) for the repos
+   you track, with these repository permissions:
+   - **Metadata**: read
+   - **Contents**: read
+   - **Pull requests**: read
+   - **Issues**: read **and write** (read-only is enough if you don't want issue creation)
+
+   Repos owned by an organization: set the token's *Resource owner* to the organization.
+   The organization may need to approve fine-grained tokens first.
 
 ### 3. Configure and run
 
@@ -63,6 +79,7 @@ set `DEV_GUILD_ID` to your server's ID so they sync instantly.
 | `DATABASE_PATH` | `data/tracker.db` | SQLite file location                                |
 | `BOT_OWNER_IDS` | *(none)*          | Comma-separated user IDs with admin rights everywhere |
 | `DEV_GUILD_ID`  | *(none)*          | Sync commands instantly to this server              |
+| `ISSUE_COOLDOWN`| `60`              | Seconds between issues per non-admin user (0 = off) |
 | `LOG_LEVEL`     | `INFO`            | Python log level                                    |
 
 ## Commands
@@ -97,12 +114,39 @@ A repo can have any number of routes.
 - `release_kind`: `All releases` / `Stable releases only` / `Pre-releases only`
 - `tag_pattern`: a glob like `v2.*`, or a regex prefixed with `re:`, e.g. `re:^v\d+\.\d+\.\d+$`
 
+### Issues — `/issue` and the message menu
+| Command | Description |
+|---|---|
+| `/issue create <repo>` | Opens a form (title, description, labels) and creates the issue on GitHub. |
+| Right-click a message → **Apps → Create GitHub issue** | Turns a chat message into an issue. The form is pre-filled with the message, and the issue links back to it and lists its attachments. If you can file in several repos, you pick one first. |
+
+Who can use these is set per server, and can be overridden per repo:
+
+| Access level | Who can create issues |
+|---|---|
+| **Bot admins only** *(default)* | Admins (Manage Server, the bot admin role, or bot owners) |
+| **Bot admins + the issue role** | Admins and members with the role set via `/admin issue-role` |
+| **Everyone** | Any server member |
+| **Nobody (disabled)** | No one, admins included |
+
+Safeguards:
+- Autocomplete and the message menu only offer repos the user is allowed to file in.
+- Non-admins have a cooldown between issues (`ISSUE_COOLDOWN`).
+- `@mentions` in text written by non-admins are defused, so Discord users can't ping
+  GitHub users or teams through the bot.
+- Every issue ends with "Reported from Discord by **name** (`username`) in **server** #channel".
+
+GitHub only applies labels if the bot's account has Triage access or higher. If any labels
+weren't applied, the confirmation message says which ones.
+
 ### Administration — `/admin`
 | Command | Description |
 |---|---|
 | 🔒 `/admin set-role <role>` | Let members with this role use admin commands. |
 | 🔒 `/admin clear-role` | Remove that role. |
-| 🔒 `/admin status` | Poll timing, GitHub rate limit, and any failing routes or feeds. |
+| 🔒 `/admin issue-access <level> [repo]` | Set who can create issues: the server default, or one repo's override (`Use server default` clears an override). |
+| 🔒 `/admin issue-role [role]` | Set the role used by the **admins + issue role** level. Leave it empty to clear. |
+| 🔒 `/admin status` | Poll timing, GitHub rate limit, issue settings, and any failing routes or feeds. |
 | 🔒 `/admin check-now` | Poll GitHub immediately. |
 
 ## Example: routing releases
@@ -114,6 +158,15 @@ A repo can have any number of routes.
 /route add   repo:my-org/app  channel:#legacy         event:Releases  tag_pattern:v1.*
 /route add   repo:my-org/app  channel:#dev-feed       event:Commits   branch:develop
 /route add   repo:my-org/app  channel:#triage         event:New issues
+```
+
+## Example: letting testers report bugs
+
+```
+/admin issue-role    role:@Testers
+/admin issue-access  level:Bot admins + the issue role
+/admin issue-access  level:Everyone  repo:my-org/public-app    # anyone can report here
+/admin issue-access  level:Nobody (disabled)  repo:my-org/internal
 ```
 
 ## How it works
@@ -150,6 +203,6 @@ bot/
   models.py    Repo/Route models, filters, repo parsing
   embeds.py    Discord embed formatting
   checks.py    admin permission check
-  cogs/        slash commands: repos.py, routes.py, admin.py
+  cogs/        slash commands: repos.py, routes.py, issues.py, admin.py
 tests/
 ```
