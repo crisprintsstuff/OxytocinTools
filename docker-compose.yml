@@ -1,0 +1,9 @@
+services:
+  tracker:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_PATH: /data/tracker.db
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
