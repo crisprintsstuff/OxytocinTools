@@ -47,3 +47,35 @@ async def test_all_commands_register():
     for cmd in bot.tree.get_commands():
         cmd.to_dict(bot.tree)
     await bot.close()
+
+
+async def test_removes_leftover_guild_commands(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    bot = TrackerBot(Config(discord_token="x"))
+    stale = SimpleNamespace(id=1, name="RepoServer"), SimpleNamespace(id=2, name="Clean")
+    monkeypatch.setattr(TrackerBot, "guilds", property(lambda self: list(stale)))
+    fetch = AsyncMock(side_effect=lambda guild: [SimpleNamespace(name="github")] if guild.id == 1 else [])
+    sync = AsyncMock(return_value=[])
+    monkeypatch.setattr(bot.tree, "fetch_commands", fetch)
+    monkeypatch.setattr(bot.tree, "sync", sync)
+
+    await bot.remove_stale_guild_commands()
+    assert [c.kwargs["guild"].id for c in sync.call_args_list] == [1]  # only the server with leftovers
+    await bot.close()
+
+
+async def test_unknown_command_gets_friendly_message():
+    from unittest.mock import AsyncMock, MagicMock
+
+    from discord import app_commands
+
+    bot = TrackerBot(Config(discord_token="x"))
+    interaction = MagicMock()
+    interaction.response.is_done.return_value = False
+    interaction.response.send_message = AsyncMock()
+    await bot.on_app_command_error(interaction, app_commands.CommandNotFound("github", []))
+    message = interaction.response.send_message.call_args.args[0]
+    assert "left over" in message and "/repo track" in message
+    await bot.close()
