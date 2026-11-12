@@ -107,7 +107,7 @@ async def test_refresh_posts_skips_unchanged_and_reposts(db):
     dash = await db.get_dashboard(dash.id)
     assert dash.message_id == 1000 and dash.last_error is None
     labels = [getattr(c, "item", c).label for c in channel.sent[0]["view"].children]
-    assert labels == ["Report issue", "Refresh", "View on GitHub"]
+    assert labels == ["Open an issue", "Refresh", "View on GitHub"]
 
     await manager.refresh(dash)  # nothing changed -> no Discord calls
     assert len(channel.sent) == 1 and channel.edited == []
@@ -147,3 +147,42 @@ async def test_deleted_message_is_reposted(db):
     assert len(channel.sent) == 2
     await manager.message_deleted(424242)  # unrelated message: ignored
     assert len(channel.sent) == 2
+
+
+def test_report_styles():
+    from bot.models import report_style
+
+    assert report_style("bug").button == "Report a bug"
+    assert report_style("enhancement").button == "Suggest a feature"
+    assert report_style("Type: Feature").emoji == "💡"
+    assert report_style("documentation").form == "Docs issue"
+    assert report_style("question").button == "Ask a question"
+    assert report_style("ui, bug").button == "Report a bug"  # first recognised label wins
+    assert report_style("wontfix").button == report_style(None).button == "Open an issue"
+
+
+def test_button_wording_changes_trigger_rerender():
+    from bot.dashboards import dashboard_view
+
+    bugs = Dashboard(**{**DASH.__dict__, "label": "bug"})
+    ideas = Dashboard(**{**DASH.__dict__, "label": "enhancement"})
+    assert dashboard_view(ideas).children[0].item.label == "Suggest a feature"
+    assert str(dashboard_view(ideas).children[0].item.emoji) == "💡"
+    # Same issues, different label wording -> different hash, so old messages get updated.
+    assert render_dashboard(bugs, [], [], interval=300, now=NOW)[1] != \
+        render_dashboard(ideas, [], [], interval=300, now=NOW)[1]
+
+
+async def test_refresh_button_works_right_after_boot(db, monkeypatch):
+    import bot.dashboards as dashboards
+
+    monkeypatch.setattr(dashboards.time, "monotonic", lambda: 3.0)  # machine just booted
+    manager, channel, _ = await make_manager(db)
+    repo = await db.add_repo(1, "o", "r", "main", None)
+    dash = await db.add_dashboard(repo, 10, label=None, pinned=False, created_by=None)
+    interaction = MagicMock(guild_id=1)
+    interaction.response.defer = AsyncMock()
+    interaction.response.send_message = AsyncMock()
+    await manager.handle_refresh(interaction, dash.id)
+    interaction.response.defer.assert_awaited()  # refreshed, not "it was just refreshed"
+    interaction.response.send_message.assert_not_awaited()

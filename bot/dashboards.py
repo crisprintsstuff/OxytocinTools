@@ -14,7 +14,7 @@ import discord
 from .checks import UserError, can_create_issue
 from .embeds import truncate
 from .github import GitHubError
-from .models import Dashboard
+from .models import Dashboard, report_style
 
 if TYPE_CHECKING:
     from .main import TrackerBot
@@ -83,7 +83,9 @@ def render_dashboard(dash: Dashboard, open_items: list[dict[str, Any]],
                     value=truncate(closed_text, 1024) or "None", inline=False)
     minutes = max(1, interval // 60)
     embed.set_footer(text=f"Updates automatically every {minutes} min · Last change")
-    basis = "\n".join([embed.title or "", embed.description or "", closed_text, str(interval)])
+    # The button wording is part of the hash so dashboards re-render when it changes.
+    button = report_style(dash.label).button
+    basis = "\n".join([embed.title or "", embed.description or "", closed_text, str(interval), button])
     return embed, hashlib.sha256(basis.encode()).hexdigest()
 
 
@@ -96,8 +98,9 @@ async def _run(interaction: discord.Interaction, coro) -> None:
 
 
 class ReportButton(discord.ui.DynamicItem[discord.ui.Button], template=r"dash:report:(?P<id>[0-9]+)"):
-    def __init__(self, dashboard_id: int):
-        super().__init__(discord.ui.Button(label="Report issue", emoji="🐛",
+    def __init__(self, dashboard_id: int, label: str | None = None):
+        style = report_style(label)
+        super().__init__(discord.ui.Button(label=style.button, emoji=style.emoji,
                                            style=discord.ButtonStyle.success,
                                            custom_id=f"dash:report:{dashboard_id}"))
         self.dashboard_id = dashboard_id
@@ -129,7 +132,7 @@ class RefreshButton(discord.ui.DynamicItem[discord.ui.Button], template=r"dash:r
 
 def dashboard_view(dash: Dashboard) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
-    view.add_item(ReportButton(dash.id))
+    view.add_item(ReportButton(dash.id, dash.label))
     view.add_item(RefreshButton(dash.id))
     view.add_item(discord.ui.Button(label="View on GitHub", url=dash.issues_url))
     return view
@@ -262,8 +265,8 @@ class DashboardManager:
 
     async def handle_refresh(self, interaction: discord.Interaction, dashboard_id: int) -> None:
         dash = await self._get(interaction, dashboard_id)
-        last = self._manual.get(dash.id, 0)
-        if time.monotonic() - last < MANUAL_REFRESH_COOLDOWN:
+        last = self._manual.get(dash.id)
+        if last is not None and time.monotonic() - last < MANUAL_REFRESH_COOLDOWN:
             await interaction.response.send_message("It was just refreshed. Try again in a few seconds.",
                                                     ephemeral=True)
             return

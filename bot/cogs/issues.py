@@ -13,7 +13,7 @@ from discord.ext import commands
 from ..checks import UserError, can_create_issue, is_admin
 from ..embeds import GREEN, truncate
 from ..github import GitHubError, NotFound
-from ..models import Repo
+from ..models import Repo, report_style
 from . import access_hint, resolve_tracked_repo
 
 if TYPE_CHECKING:
@@ -57,13 +57,14 @@ class IssueModal(discord.ui.Modal):
     def __init__(self, cog: "Issues", repo: Repo, *, title: str | None = None,
                  body: str | None = None, source: discord.Message | None = None,
                  labels: str | None = None):
-        super().__init__(title=truncate(f"New issue: {repo.full_name}", 45))
+        style = report_style(labels)
+        super().__init__(title=truncate(f"{style.form}: {repo.full_name}", 45))
         self.cog, self.repo, self.source = cog, repo, source
         self.issue_title = discord.ui.TextInput(label="Title", max_length=256, default=title or None)
         self.body = discord.ui.TextInput(
             label="Description", style=discord.TextStyle.paragraph, required=False,
             max_length=4000, default=truncate(body, 4000) if body else None,
-            placeholder="What happened? What did you expect? Steps to reproduce?",
+            placeholder=style.placeholder,
         )
         self.labels = discord.ui.TextInput(
             label="Labels (optional, comma-separated)", required=False, max_length=200,
@@ -132,7 +133,10 @@ class Issues(commands.GroupCog, group_name="issue",
         if not cooldown or await is_admin(interaction):
             return
         key = (interaction.guild_id or 0, interaction.user.id)
-        remaining = self._last_issue.get(key, 0) + cooldown - time.monotonic()
+        last = self._last_issue.get(key)
+        if last is None:  # never created one (don't treat as time 0: monotonic starts at boot)
+            return
+        remaining = last + cooldown - time.monotonic()
         if remaining > 0:
             raise UserError(f"Slow down! You can create another issue in {int(remaining) + 1}s.")
 

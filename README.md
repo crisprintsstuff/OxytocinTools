@@ -196,8 +196,17 @@ Each dashboard shows:
 - When it last changed
 
 Buttons:
-- **🐛 Report issue**: opens the issue form for that repo, pre-filled with the dashboard's
-  label. It follows the same access rules and cooldown as `/issue create`.
+- **Report button**: opens the issue form for that repo, with the dashboard's label already
+  filled in. It follows the same access rules and cooldown as `/issue create`. The button
+  and form wording match the label:
+
+  | Dashboard label contains | Button | Form title |
+  |---|---|---|
+  | `bug` | 🐛 Report a bug | Bug report |
+  | `enhancement` or `feature` | 💡 Suggest a feature | Feature request |
+  | `doc` (e.g. `documentation`) | 📚 Suggest a docs change | Docs issue |
+  | `question` | ❓ Ask a question | Question |
+  | anything else, or no label | 📝 Open an issue | New issue |
 - **🔄 Refresh**: updates it now (anyone can press it, at most once every 15 seconds).
 - **View on GitHub**: opens the repo's issues page.
 
@@ -247,6 +256,7 @@ something actually changed, and unchanged GitHub data doesn't use up your rate l
 ```
 /dashboard create  repo:crisprintsstuff/OxyBrush  channel:#oxybrush-issues  pin:True
 /dashboard create  repo:crisprintsstuff/OxyBrush  channel:#bugs  label:bug
+/dashboard create  repo:crisprintsstuff/OxyBrush  channel:#ideas  label:enhancement
 ```
 
 ## How it works

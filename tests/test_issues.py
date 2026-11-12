@@ -124,3 +124,26 @@ async def test_submit_permission_errors(db):
         await cog.submit(interaction(db, member(), github=github), repo, "T", "", "", None)
     with pytest.raises(UserError, match=r"Issues: Read and write.*install it here"):
         await cog.submit(interaction(db, member(manage=True), github=github), repo, "T", "", "", None)
+
+
+async def test_cooldown_allows_first_issue_right_after_boot(db, monkeypatch):
+    import bot.cogs.issues as issues
+
+    monkeypatch.setattr(issues.time, "monotonic", lambda: 3.0)  # machine just booted
+    cog = Issues.__new__(Issues)
+    inter = interaction(db, member())
+    cog.bot, cog._last_issue = inter.client, {}
+    await cog.check_cooldown(inter)  # must not raise
+    cog._last_issue[(1, 5)] = 3.0
+    with pytest.raises(UserError, match="Slow down"):
+        await cog.check_cooldown(inter)
+
+
+def test_issue_form_matches_label():
+    from bot.cogs.issues import IssueModal
+    from bot.models import Repo
+
+    repo = Repo(1, 1, "o", "r", "main")
+    assert IssueModal(None, repo, labels="enhancement").title == "Feature request: o/r"
+    assert IssueModal(None, repo, labels="bug").body.placeholder.startswith("What happened")
+    assert IssueModal(None, repo).title == "New issue: o/r"

@@ -9,6 +9,41 @@ from typing import Any
 EVENT_TYPES = ("releases", "commits", "issues", "pulls")
 RELEASE_KINDS = ("all", "stable", "prerelease")
 
+@dataclass(frozen=True)
+class ReportStyle:
+    """Wording for the "report" button and issue form, based on a label."""
+    emoji: str
+    button: str
+    form: str
+    placeholder: str
+
+
+_GENERIC_STYLE = ReportStyle("📝", "Open an issue", "New issue",
+                             "Describe the issue or idea in as much detail as you can.")
+_REPORT_STYLES = [
+    (("bug",), ReportStyle("🐛", "Report a bug", "Bug report",
+                           "What happened? What did you expect? Steps to reproduce?")),
+    (("enhancement", "feature"), ReportStyle("💡", "Suggest a feature", "Feature request",
+                                             "What would you like? What problem would it solve?")),
+    (("doc",), ReportStyle("📚", "Suggest a docs change", "Docs issue",
+                           "Which page or section? What's missing, wrong or unclear?")),
+    (("question",), ReportStyle("❓", "Ask a question", "Question",
+                                "What would you like to know? What have you tried so far?")),
+]
+
+
+def report_style(labels: str | None) -> ReportStyle:
+    """Pick button/form wording from a label, e.g. ``bug``, ``enhancement``, ``type: feature``.
+
+    With several comma-separated labels, the first recognised one wins.
+    """
+    for label in (labels or "").lower().split(","):
+        for keywords, style in _REPORT_STYLES:
+            if any(k in label for k in keywords):
+                return style
+    return _GENERIC_STYLE
+
+
 # Who may create GitHub issues from Discord.
 ISSUE_ACCESS_LABELS = {
     "disabled": "Nobody (disabled)",
