@@ -9,6 +9,7 @@ from discord.ext import commands
 
 from .checks import NotBotAdmin, UserError
 from .config import Config
+from .dashboards import DashboardManager, RefreshButton, ReportButton
 from .db import Database
 from .embeds import build_embeds
 from .github import GitHubClient, GitHubError
@@ -17,13 +18,15 @@ from .poller import Poller
 
 log = logging.getLogger("bot")
 
-EXTENSIONS = ("bot.cogs.repos", "bot.cogs.routes", "bot.cogs.admin", "bot.cogs.issues")
+EXTENSIONS = ("bot.cogs.repos", "bot.cogs.routes", "bot.cogs.admin", "bot.cogs.issues",
+              "bot.cogs.dashboards")
 
 
 class TrackerBot(commands.Bot):
     db: Database
     github: GitHubClient
     poller: Poller
+    dashboards: DashboardManager
 
     def __init__(self, config: Config):
         intents = discord.Intents.default()  # no privileged intents needed
@@ -40,9 +43,13 @@ class TrackerBot(commands.Bot):
         except GitHubError as exc:
             raise SystemExit(str(exc)) from exc
         await self.github.start()
+        self.dashboards = DashboardManager(self)
         self.poller = Poller(self.db, self.github, self.deliver,
                              interval=self.config.poll_interval,
-                             wait_until_ready=self.wait_until_ready)
+                             wait_until_ready=self.wait_until_ready,
+                             after_cycle=self.dashboards.refresh_all)
+        # Dashboard buttons keep working after restarts: their IDs encode the dashboard.
+        self.add_dynamic_items(ReportButton, RefreshButton)
         for ext in EXTENSIONS:
             await self.load_extension(ext)
         self.tree.on_error = self.on_app_command_error
@@ -80,8 +87,16 @@ class TrackerBot(commands.Bot):
 
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
         removed = await self.db.remove_routes_for_channel(channel.id)
+        removed += await self.db.remove_dashboards_for_channel(channel.id)
         if removed:
-            log.info("Channel %s deleted; removed %d route(s)", channel.id, removed)
+            log.info("Channel %s deleted; removed %d route(s)/dashboard(s)", channel.id, removed)
+
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        await self.dashboards.message_deleted(payload.message_id)
+
+    async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
+        for message_id in payload.message_ids:
+            await self.dashboards.message_deleted(message_id)
 
     # ------------------------------------------------------------------ delivery
     async def deliver(self, route: Route, stream: str, items: list[dict[str, Any]]) -> None:

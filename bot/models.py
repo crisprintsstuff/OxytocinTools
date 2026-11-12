@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+from urllib.parse import quote
 from dataclasses import dataclass
 from typing import Any
 
@@ -136,3 +137,33 @@ class Route:
         if self.crosspost:
             parts.append("auto-publish")
         return ", ".join(parts)
+
+
+@dataclass
+class Dashboard:
+    id: int
+    repo_id: int
+    guild_id: int
+    owner: str
+    name: str
+    channel_id: int
+    message_id: int | None = None
+    label: str | None = None
+    pinned: bool = False
+    last_hash: str | None = None
+    last_change: float | None = None
+    last_error: str | None = None
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.owner}/{self.name}"
+
+    @property
+    def issues_url(self) -> str:
+        url = f"https://github.com/{self.full_name}/issues"
+        if self.label:
+            url += "?q=" + quote(f'is:issue is:open label:"{self.label}"')
+        return url
+
+    def describe(self) -> str:
+        return self.full_name + (f" (label `{self.label}`)" if self.label else "")

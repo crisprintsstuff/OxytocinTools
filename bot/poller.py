@@ -26,8 +26,10 @@ class Poller:
     """
 
     def __init__(self, db: Database, github: GitHubClient, sender: Sender,
-                 interval: int = 300, wait_until_ready: Callable[[], Awaitable[Any]] | None = None):
+                 interval: int = 300, wait_until_ready: Callable[[], Awaitable[Any]] | None = None,
+                 after_cycle: Callable[[], Awaitable[Any]] | None = None):
         self.db = db
+        self._after_cycle = after_cycle
         self.github = github
         self.sender = sender
         self.interval = interval
@@ -68,6 +70,11 @@ class Poller:
                 await self.poll_once()
             except Exception:
                 log.exception("Poll cycle failed")
+            if self._after_cycle:
+                try:
+                    await self._after_cycle()
+                except Exception:
+                    log.exception("After-cycle hook failed")
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=self.interval)
             except asyncio.TimeoutError:

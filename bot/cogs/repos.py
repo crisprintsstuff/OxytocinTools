@@ -76,12 +76,22 @@ class Repos(commands.GroupCog, group_name="repo", group_description="Track GitHu
         routes = await self.bot.db.list_routes(tracked.guild_id, tracked.id)
         view = ConfirmView(interaction.user.id)
         await interaction.response.send_message(
-            f"Stop tracking **{tracked.full_name}** and delete its {len(routes)} route(s)?",
+            f"Stop tracking **{tracked.full_name}** and delete its {len(routes)} route(s) "
+            "and any issue dashboards?",
             view=view, ephemeral=True,
         )
         await view.wait()
         if view.confirmed:
+            dashboards = [d for d in await self.bot.db.list_dashboards(tracked.guild_id)
+                          if d.repo_id == tracked.id]
             await self.bot.db.remove_repo(tracked.id)
+            for dash in dashboards:  # take the dashboard messages down too
+                channel = interaction.guild.get_channel(dash.channel_id)  # type: ignore[union-attr]
+                if isinstance(channel, discord.TextChannel) and dash.message_id:
+                    try:
+                        await channel.get_partial_message(dash.message_id).delete()
+                    except discord.HTTPException:
+                        pass
             await interaction.edit_original_response(
                 content=f"🗑️ Stopped tracking **{tracked.full_name}**.", view=None)
         elif view.confirmed is None:

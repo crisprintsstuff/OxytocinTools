@@ -40,6 +40,7 @@ async def test_all_commands_register():
         "route": ["add", "list", "remove", "test", "toggle"],
         "admin": ["check-now", "clear-role", "issue-access", "issue-role", "set-role", "status"],
         "issue": ["create"],
+        "dashboard": ["create", "list", "remove"],
         "Create GitHub issue": [],
     }
     # Payloads must serialise (catches invalid option definitions).
