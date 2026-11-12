@@ -83,9 +83,16 @@ can't write to repos owned by another account.
 
 ```bash
 cp .env.example .env      # fill in DISCORD_TOKEN and GITHUB_APP_ID
+python3 -m venv .venv     # on Debian/Ubuntu, first: sudo apt install python3-venv
+source .venv/bin/activate # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python -m bot
 ```
+
+The virtual environment (`.venv`) keeps the bot's packages separate from your system's
+Python. Without it, Debian and Ubuntu refuse `pip install` with an
+`externally-managed-environment` error. Later, start the bot with
+`source .venv/bin/activate` and then `python -m bot`, or with `.venv/bin/python -m bot`.
 
 Or with Docker:
 
@@ -220,6 +227,7 @@ its filters, oldest first.
 ## Development
 
 ```bash
+source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest
 ```
