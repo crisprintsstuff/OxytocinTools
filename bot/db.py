@@ -5,7 +5,7 @@ from typing import Any, Iterable
 
 import aiosqlite
 
-from .models import Repo, Route
+from .models import Dashboard, Repo, Route
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS guild_settings (
@@ -44,6 +44,22 @@ CREATE TABLE IF NOT EXISTS routes (
     created_at      TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS dashboards (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    channel_id  INTEGER NOT NULL,
+    message_id  INTEGER,
+    label       TEXT,
+    pinned      INTEGER NOT NULL DEFAULT 0,
+    last_hash   TEXT,
+    last_change REAL,
+    last_error  TEXT,
+    created_by  INTEGER,
+    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS dashboards_message ON dashboards (message_id);
+
 -- Polling state is shared by every server tracking the same repo, so each
 -- GitHub feed is fetched once per cycle no matter how many servers use it.
 CREATE TABLE IF NOT EXISTS streams (
@@ -81,6 +97,19 @@ SELECT r.id, r.repo_id, p.guild_id, p.owner, p.name, r.channel_id, r.event_type,
        r.enabled, r.last_error
 FROM routes r JOIN repos p ON p.id = r.repo_id
 """
+
+
+_DASHBOARD_SELECT = """
+SELECT d.id, d.repo_id, p.guild_id, p.owner, p.name, d.channel_id, d.message_id, d.label,
+       d.pinned, d.last_hash, d.last_change, d.last_error
+FROM dashboards d JOIN repos p ON p.id = d.repo_id
+"""
+
+
+def _dashboard(row: Iterable[Any]) -> Dashboard:
+    values = list(row)
+    values[8] = bool(values[8])
+    return Dashboard(*values)
 
 
 def _route(row: Iterable[Any]) -> Route:
@@ -250,6 +279,70 @@ class Database:
 
     async def remove_routes_for_channel(self, channel_id: int) -> int:
         cur = await self.conn.execute("DELETE FROM routes WHERE channel_id = ?", (channel_id,))
+        await self.conn.commit()
+        return cur.rowcount
+
+    # ---------------------------------------------------------------- dashboards
+    async def add_dashboard(self, repo: Repo, channel_id: int, *, label: str | None,
+                            pinned: bool, created_by: int | None) -> Dashboard:
+        cur = await self.conn.execute(
+            "INSERT INTO dashboards (repo_id, channel_id, label, pinned, created_by) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (repo.id, channel_id, label, int(pinned), created_by),
+        )
+        await self.conn.commit()
+        dash = await self.get_dashboard(cur.lastrowid)
+        assert dash is not None
+        return dash
+
+    async def get_dashboard(self, dashboard_id: int, guild_id: int | None = None) -> Dashboard | None:
+        sql, params = _DASHBOARD_SELECT + " WHERE d.id = ?", [dashboard_id]
+        if guild_id is not None:
+            sql += " AND p.guild_id = ?"
+            params.append(guild_id)
+        async with self.conn.execute(sql, params) as cur:
+            row = await cur.fetchone()
+        return _dashboard(row) if row else None
+
+    async def list_dashboards(self, guild_id: int | None = None) -> list[Dashboard]:
+        sql, params = _DASHBOARD_SELECT, []
+        if guild_id is not None:
+            sql += " WHERE p.guild_id = ?"
+            params.append(guild_id)
+        sql += " ORDER BY lower(p.owner), lower(p.name), d.id"
+        async with self.conn.execute(sql, params) as cur:
+            return [_dashboard(row) for row in await cur.fetchall()]
+
+    async def set_dashboard_message(self, dashboard_id: int, message_id: int | None) -> None:
+        await self.conn.execute("UPDATE dashboards SET message_id = ? WHERE id = ?",
+                                (message_id, dashboard_id))
+        await self.conn.commit()
+
+    async def set_dashboard_state(self, dashboard_id: int, *, last_hash: str | None,
+                                  last_change: float | None, error: str | None) -> None:
+        await self.conn.execute(
+            "UPDATE dashboards SET last_hash = ?, last_change = ?, last_error = ? WHERE id = ?",
+            (last_hash, last_change, error, dashboard_id),
+        )
+        await self.conn.commit()
+
+    async def set_dashboard_error(self, dashboard_id: int, error: str | None) -> None:
+        await self.conn.execute("UPDATE dashboards SET last_error = ? WHERE id = ?",
+                                (error, dashboard_id))
+        await self.conn.commit()
+
+    async def get_dashboard_by_message(self, message_id: int) -> Dashboard | None:
+        async with self.conn.execute(_DASHBOARD_SELECT + " WHERE d.message_id = ?",
+                                     (message_id,)) as cur:
+            row = await cur.fetchone()
+        return _dashboard(row) if row else None
+
+    async def remove_dashboard(self, dashboard_id: int) -> None:
+        await self.conn.execute("DELETE FROM dashboards WHERE id = ?", (dashboard_id,))
+        await self.conn.commit()
+
+    async def remove_dashboards_for_channel(self, channel_id: int) -> int:
+        cur = await self.conn.execute("DELETE FROM dashboards WHERE channel_id = ?", (channel_id,))
         await self.conn.commit()
         return cur.rowcount
 

@@ -265,6 +265,12 @@ class GitHubClient:
         _, data, _ = await self._request("POST", f"/repos/{owner}/{name}/issues", json=payload)
         return data
 
+    async def list_issues(self, owner: str, name: str, params: dict[str, Any],
+                          etag: str | None = None) -> tuple[list[dict[str, Any]] | None, str | None]:
+        """List issues *and* pull requests (``pull_request`` key marks PRs). None = unchanged."""
+        status, data, new_etag = await self._get(f"/repos/{owner}/{name}/issues", params, etag)
+        return (None if status == 304 else data), new_etag
+
     async def get_branch(self, owner: str, name: str, branch: str) -> dict[str, Any]:
         _, data, _ = await self._get(f"/repos/{owner}/{name}/branches/{quote(branch, safe='')}")
         return data

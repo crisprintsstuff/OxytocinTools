@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -54,7 +55,8 @@ def _title_from(text: str) -> str:
 
 class IssueModal(discord.ui.Modal):
     def __init__(self, cog: "Issues", repo: Repo, *, title: str | None = None,
-                 body: str | None = None, source: discord.Message | None = None):
+                 body: str | None = None, source: discord.Message | None = None,
+                 labels: str | None = None):
         super().__init__(title=truncate(f"New issue: {repo.full_name}", 45))
         self.cog, self.repo, self.source = cog, repo, source
         self.issue_title = discord.ui.TextInput(label="Title", max_length=256, default=title or None)
@@ -65,7 +67,7 @@ class IssueModal(discord.ui.Modal):
         )
         self.labels = discord.ui.TextInput(
             label="Labels (optional, comma-separated)", required=False, max_length=200,
-            placeholder="bug, ui",
+            placeholder="bug, ui", default=labels or None,
         )
         for item in (self.issue_title, self.body, self.labels):
             self.add_item(item)
@@ -182,6 +184,9 @@ class Issues(commands.GroupCog, group_name="issue",
             raise
         self._last_issue[(interaction.guild_id or 0, user.id)] = time.monotonic()
         log.info("User %s created issue %s#%s", user.id, repo.full_name, issue["number"])
+        dashboards = getattr(self.bot, "dashboards", None)
+        if dashboards is not None:  # show the new issue on this repo's dashboards right away
+            asyncio.create_task(dashboards.refresh_repo(repo.guild_id, repo.id))
 
         embed = discord.Embed(title=truncate(f"#{issue['number']} {issue['title']}", 256),
                               url=issue["html_url"], color=GREEN,

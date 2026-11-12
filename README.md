@@ -9,6 +9,7 @@ pre-releases to `#beta-testers`, `v2.*` tags to `#v2`, and so on.
 - Slash commands, with autocomplete for tracked repos and routes
 - Per-route filters: stable vs. pre-release, tag pattern (glob or regex), and branch for commits
 - Optional role ping per route, and auto-publish in announcement channels
+- Live issue dashboards: one message per repo that stays up to date, with a Report button
 - Create issues with `/issue create` or by right-clicking a message, with configurable access and a cooldown
 - Admin permissions: **Manage Server**, a configurable bot admin role, or owner IDs
 - Works across many servers; each GitHub feed is fetched once per cycle no matter how many servers use it
@@ -31,6 +32,8 @@ pre-releases to `#beta-testers`, `v2.*` tags to `#v2`, and so on.
 
    That grants View Channels, Send Messages, Embed Links and Mention All Roles.
    Mention All Roles is only needed to ping roles that aren't set as mentionable.
+   To let the bot pin dashboards, also give it **Manage Messages** in those channels
+   (or use `permissions=158720` in the link to grant it everywhere).
 
 ### 2. Create a GitHub App (recommended)
 
@@ -175,6 +178,39 @@ Safeguards:
 Issues can only be created in repos where the GitHub App is installed. If GitHub doesn't
 apply some of the labels someone typed, the confirmation message says which ones.
 
+### Issue dashboards — `/dashboard`
+A dashboard is one message in a channel that the bot keeps editing, so it always shows a
+repo's current issues. The channel doesn't fill up with new posts.
+
+| Command | Description |
+|---|---|
+| 🔒 `/dashboard create <repo> <channel> [label] [pin]` | Post a dashboard. `label` shows only issues with that GitHub label (e.g. a "bug" dashboard). `pin` pins it. |
+| 🔒 `/dashboard list` | Show dashboards, with links and any errors. |
+| 🔒 `/dashboard remove <dashboard> [delete_message]` | Delete a dashboard and, by default, its message. |
+
+Each dashboard shows:
+- Open issue and pull request counts
+- The 15 newest open issues, with labels and age
+- Issues closed in the last 7 days
+- When it last changed
+
+Buttons:
+- **🐛 Report issue**: opens the issue form for that repo, pre-filled with the dashboard's
+  label. It follows the same access rules and cooldown as `/issue create`.
+- **🔄 Refresh**: updates it now (anyone can press it, at most once every 15 seconds).
+- **View on GitHub**: opens the repo's issues page.
+
+Dashboards update on every GitHub check (`POLL_INTERVAL`), right after an issue is
+created from Discord, and when someone presses Refresh. The message is only edited when
+something actually changed, and unchanged GitHub data doesn't use up your rate limit.
+
+- **If someone deletes a dashboard message**, the bot posts it again. To get rid of a
+  dashboard for good, use `/dashboard remove`.
+- **Buttons keep working** after the bot restarts.
+- **Untracking the repo** or deleting the channel removes its dashboards.
+- **Pinning** needs the **Manage Messages** (or **Pin Messages**) permission in that channel.
+- **Counts** read the newest 100 open items; above that they show as `100+`.
+
 ### Administration — `/admin`
 | Command | Description |
 |---|---|
@@ -203,6 +239,13 @@ apply some of the labels someone typed, the confirmation message says which ones
 /admin issue-access  level:Bot admins + the issue role
 /admin issue-access  level:Everyone  repo:my-org/public-app    # anyone can report here
 /admin issue-access  level:Nobody (disabled)  repo:my-org/internal
+```
+
+## Example: a bug dashboard
+
+```
+/dashboard create  repo:crisprintsstuff/OxyBrush  channel:#oxybrush-issues  pin:True
+/dashboard create  repo:crisprintsstuff/OxyBrush  channel:#bugs  label:bug
 ```
 
 ## How it works
@@ -243,6 +286,7 @@ bot/
   models.py    Repo/Route models, filters, repo parsing
   embeds.py    Discord embed formatting
   checks.py    admin permission check
-  cogs/        slash commands: repos.py, routes.py, issues.py, admin.py
+  dashboards.py  live issue dashboards: rendering, refreshing, buttons
+  cogs/        slash commands: repos.py, routes.py, issues.py, dashboards.py, admin.py
 tests/
 ```

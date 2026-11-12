@@ -149,6 +149,9 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
                 state = await bot.db.get_stream(r.repo_key, r.stream)
                 if r.enabled and state and state["last_error"]:
                     problems.append(f"Route `#{r.id}` ({r.full_name} {r.stream}): {state['last_error']}")
+        for d in await bot.db.list_dashboards(interaction.guild.id):
+            if d.last_error:
+                problems.append(f"Dashboard `#{d.id}` ({d.full_name}): {d.last_error}")
         if problems:
             embed.add_field(name="⚠️ Problems", value="\n".join(problems)[:1024], inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True,
