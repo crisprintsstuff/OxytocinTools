@@ -24,6 +24,7 @@ class Config:
     dev_guild_id: int | None = None
     log_level: str = "INFO"
     issue_cooldown: int = 60
+    release_notes_wait: int = 30  # minutes
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -59,4 +60,5 @@ class Config:
             dev_guild_id=int(dev_guild) if dev_guild else None,
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             issue_cooldown=max(0, int(os.getenv("ISSUE_COOLDOWN", "60") or 60)),
+            release_notes_wait=max(0, int(os.getenv("RELEASE_NOTES_WAIT", "30") or 30)),
         )

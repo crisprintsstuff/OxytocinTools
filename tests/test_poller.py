@@ -110,3 +110,63 @@ async def test_missing_feed_does_not_break_cycle(db):
     gh.feeds[("o/r", "releases")] = [rel(1, "v1")]
     await poller.poll_once()
     assert sent == [(route.id, "releases", ["v1"])]
+
+
+def notes_rel(id_, tag, body, age):
+    from datetime import datetime, timezone
+    import time as _time
+
+    published = datetime.fromtimestamp(_time.time() - age, tz=timezone.utc)
+    return {"id": id_, "tag_name": tag, "prerelease": True, "body": body,
+            "published_at": published.strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+async def test_waits_for_release_notes(db):
+    poller, gh, sent = await make(db)
+    poller.release_notes_wait = 1800
+    repo = await db.add_repo(1, "o", "r", "main", None)
+    route = await db.add_route(repo, 10, "releases")
+    gh.feeds[("o/r", "releases")] = []
+    await poller.poll_once()
+
+    # Published a minute ago with empty notes: held back, and the ETag is dropped so the
+    # next poll re-checks it even if GitHub reports no change.
+    gh.feeds[("o/r", "releases")] = [notes_rel(1, "v1.0-beta", "  ", age=60)]
+    await poller.poll_once()
+    assert sent == []
+    assert (await db.get_stream("o/r", "releases"))["etag"] is None
+    await poller.poll_once()
+    assert sent == []
+
+    # Notes filled in: posted once, with the notes.
+    gh.feeds[("o/r", "releases")] = [notes_rel(1, "v1.0-beta", "Fixed stuff", age=400)]
+    await poller.poll_once()
+    assert sent == [(route.id, "releases", ["v1.0-beta"])]
+    await poller.poll_once()
+    assert len(sent) == 1
+    assert (await db.get_stream("o/r", "releases"))["etag"] is not None
+
+
+async def test_posts_without_notes_after_time_limit(db):
+    poller, gh, sent = await make(db)
+    poller.release_notes_wait = 1800
+    repo = await db.add_repo(1, "o", "r", "main", None)
+    route = await db.add_route(repo, 10, "releases")
+    gh.feeds[("o/r", "releases")] = []
+    await poller.poll_once()
+
+    gh.feeds[("o/r", "releases")] = [notes_rel(2, "v2", "", age=1801),
+                                     notes_rel(1, "v1", "", age=60)]
+    await poller.poll_once()
+    assert sent == [(route.id, "releases", ["v2"])]  # v1 still waiting
+
+
+async def test_no_waiting_when_disabled(db):
+    poller, gh, sent = await make(db)  # release_notes_wait defaults to 0
+    repo = await db.add_repo(1, "o", "r", "main", None)
+    await db.add_route(repo, 10, "releases")
+    gh.feeds[("o/r", "releases")] = []
+    await poller.poll_once()
+    gh.feeds[("o/r", "releases")] = [notes_rel(1, "v1", "", age=5)]
+    await poller.poll_once()
+    assert len(sent) == 1

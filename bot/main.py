@@ -49,7 +49,8 @@ class TrackerBot(commands.Bot):
         self.poller = Poller(self.db, self.github, self.deliver,
                              interval=self.config.poll_interval,
                              wait_until_ready=self.wait_until_ready,
-                             after_cycle=self.dashboards.refresh_all)
+                             after_cycle=self.dashboards.refresh_all,
+                             release_notes_wait=self.config.release_notes_wait * 60)
         # Dashboard buttons keep working after restarts: their IDs encode the dashboard.
         self.add_dynamic_items(ReportButton, RefreshButton)
         for ext in EXTENSIONS:

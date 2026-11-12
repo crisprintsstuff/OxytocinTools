@@ -117,6 +117,7 @@ application.
 | `GITHUB_APP_PRIVATE_KEY` | *(none)* | The key inline, with `\n` for line breaks, instead of a file |
 | `GITHUB_TOKEN`  | *(none)*          | Optional personal token: fallback for repos without the app |
 | `POLL_INTERVAL` | `300`             | Seconds between checks (minimum 60)                 |
+| `RELEASE_NOTES_WAIT` | `30`         | Minutes to hold back a release with empty notes (0 = off) |
 | `DATABASE_PATH` | `data/tracker.db` | SQLite file location                                |
 | `BOT_OWNER_IDS` | *(none)*          | Comma-separated user IDs with admin rights everywhere |
 | `ISSUE_COOLDOWN`| `60`              | Seconds between issues per non-admin user (0 = off) |
@@ -267,6 +268,10 @@ once. Conditional requests (ETags) mean an unchanged feed costs nothing against 
 New items are compared with the IDs already seen, and each route posts the ones that pass
 its filters, oldest first.
 
+- **Releases wait for their notes.** If a release is published with empty notes, the bot
+  holds it back and posts it as soon as the notes are filled in. If none are added within
+  `RELEASE_NOTES_WAIT` minutes (30 by default), it posts the release anyway. Tip: on
+  GitHub you can also **Save draft**, write the notes, then publish. Drafts are never posted.
 - **New routes start from "now".** When a route is created, the feed's current state is
   recorded, so old releases are never re-announced.
 - **Paused or removed routes** release their feed. When the route is resumed, the bot takes
