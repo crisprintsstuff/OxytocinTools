@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -33,6 +34,7 @@ class TrackerBot(commands.Bot):
         super().__init__(command_prefix=commands.when_mentioned, intents=intents,
                          help_command=None)
         self.config = config
+        self._cleaned_guild_commands = False
 
     async def setup_hook(self) -> None:
         self.db = await Database.open(self.config.database_path)
@@ -54,14 +56,12 @@ class TrackerBot(commands.Bot):
             await self.load_extension(ext)
         self.tree.on_error = self.on_app_command_error
 
+        # Registering globally replaces the application's whole global command list,
+        # so commands left over from older code or another bot are removed.
+        synced = await self.tree.sync()
+        log.info("Registered %d commands", len(synced))
         if self.config.dev_guild_id:
-            guild = discord.Object(id=self.config.dev_guild_id)
-            self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
-            log.info("Synced %d commands to dev guild %s", len(synced), guild.id)
-        else:
-            synced = await self.tree.sync()
-            log.info("Synced %d global commands (may take a while to appear)", len(synced))
+            log.info("DEV_GUILD_ID is no longer used: commands are registered for all servers")
 
         if self.github.auth_mode == "anonymous":
             log.warning("No GitHub App or GITHUB_TOKEN configured: public repos only, "
@@ -80,6 +80,27 @@ class TrackerBot(commands.Bot):
     async def on_ready(self) -> None:
         log.info("Logged in as %s (%s) in %d server(s)", self.user, self.user and self.user.id,
                  len(self.guilds))
+        if not self._cleaned_guild_commands:
+            self._cleaned_guild_commands = True
+            asyncio.create_task(self.remove_stale_guild_commands())
+
+    async def remove_stale_guild_commands(self) -> None:
+        """Delete per-server commands, e.g. from an older version or another bot on this app.
+
+        This bot only registers global commands, so any server-specific command is a
+        leftover that Discord would still show but nothing would answer.
+        """
+        for guild in self.guilds:
+            try:
+                leftovers = await self.tree.fetch_commands(guild=guild)
+                if not leftovers:
+                    continue
+                self.tree.clear_commands(guild=guild)
+                await self.tree.sync(guild=guild)
+                log.info("Removed %d leftover command(s) from server %s: %s", len(leftovers),
+                         guild.name, ", ".join("/" + c.name for c in leftovers))
+            except discord.HTTPException as exc:
+                log.warning("Couldn't check leftover commands in %s: %s", guild.name, exc)
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         log.info("Removed from guild %s; deleting its configuration", guild.id)
@@ -138,6 +159,10 @@ class TrackerBot(commands.Bot):
         original = getattr(error, "original", error)
         if isinstance(original, (UserError, NotBotAdmin)):
             message = str(original)
+        elif isinstance(original, app_commands.CommandNotFound):
+            message = ("That command is left over from an older setup and no longer exists. "
+                       "It will disappear from the menu once the bot restarts. To add a repo, "
+                       "use `/repo track`.")
         elif isinstance(original, app_commands.NoPrivateMessage):
             message = "This command only works in a server."
         elif isinstance(original, app_commands.CheckFailure):

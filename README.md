@@ -104,8 +104,10 @@ cp .env.example .env      # and put the key at data/github-app.pem
 docker compose up -d --build
 ```
 
-Global slash commands can take a few minutes to appear the first time. While testing,
-set `DEV_GUILD_ID` to your server's ID so they sync instantly.
+Slash commands are registered every time the bot starts. If new ones don't show up, restart
+your Discord app (or press Ctrl+R) to refresh its command list. The bot also removes
+commands left over from older versions, or from other code that used the same Discord
+application.
 
 | Variable        | Default           | Description                                         |
 |-----------------|-------------------|-----------------------------------------------------|
@@ -117,7 +119,6 @@ set `DEV_GUILD_ID` to your server's ID so they sync instantly.
 | `POLL_INTERVAL` | `300`             | Seconds between checks (minimum 60)                 |
 | `DATABASE_PATH` | `data/tracker.db` | SQLite file location                                |
 | `BOT_OWNER_IDS` | *(none)*          | Comma-separated user IDs with admin rights everywhere |
-| `DEV_GUILD_ID`  | *(none)*          | Sync commands instantly to this server              |
 | `ISSUE_COOLDOWN`| `60`              | Seconds between issues per non-admin user (0 = off) |
 | `LOG_LEVEL`     | `INFO`            | Python log level                                    |
 
