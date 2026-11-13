@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from .db import Database
@@ -27,8 +28,11 @@ class Poller:
 
     def __init__(self, db: Database, github: GitHubClient, sender: Sender,
                  interval: int = 300, wait_until_ready: Callable[[], Awaitable[Any]] | None = None,
-                 after_cycle: Callable[[], Awaitable[Any]] | None = None):
+                 after_cycle: Callable[[], Awaitable[Any]] | None = None,
+                 release_notes_wait: int = 0):
         self.db = db
+        # Seconds to hold back a new release whose notes are still empty (0 = don't wait).
+        self.release_notes_wait = release_notes_wait
         self._after_cycle = after_cycle
         self.github = github
         self.sender = sender
@@ -125,6 +129,16 @@ class Poller:
             if await self.db.get_stream(route.repo_key, route.stream) is None:
                 await self._poll_stream(route.repo_key, route.stream, [])
 
+    def _awaiting_notes(self, stream: str, item: dict[str, Any]) -> bool:
+        """A new release with empty notes is held back until notes appear or time runs out."""
+        if stream != "releases" or not self.release_notes_wait or (item.get("body") or "").strip():
+            return False
+        published = item.get("published_at") or item.get("created_at")
+        if not published:
+            return False
+        age = time.time() - datetime.fromisoformat(published.replace("Z", "+00:00")).timestamp()
+        return age < self.release_notes_wait
+
     async def _poll_stream(self, repo_key: str, stream: str, routes: list[Route]) -> None:
         owner, name = repo_key.split("/", 1)
         if routes:
@@ -157,10 +171,16 @@ class Poller:
             return
 
         seen = await self.db.seen_ids(repo_key, stream)
-        new = [item for item, i in zip(items, ids) if i not in seen]
-        await self.db.mark_seen(repo_key, stream, ids)
+        waiting = {i for item, i in zip(items, ids)
+                   if i not in seen and self._awaiting_notes(stream, item)}
+        new = [item for item, i in zip(items, ids) if i not in seen and i not in waiting]
+        await self.db.mark_seen(repo_key, stream, [i for i in ids if i not in waiting])
         await self.db.prune_seen(repo_key, stream, ids)
-        await self.db.save_stream(repo_key, stream, etag=etag)
+        # While a release is waiting for notes, skip the ETag so the next poll always
+        # re-checks it, even if nothing changed (otherwise the time limit could never pass).
+        await self.db.save_stream(repo_key, stream, etag=None if waiting else etag)
+        if waiting:
+            log.info("%s: %d release(s) waiting for release notes", repo_key, len(waiting))
         if not new:
             return
 
