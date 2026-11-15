@@ -41,6 +41,7 @@ async def test_all_commands_register():
         "admin": ["check-now", "clear-role", "issue-access", "issue-role", "set-role", "status"],
         "issue": ["create"],
         "dashboard": ["create", "list", "remove"],
+        "watch": ["forum", "list", "remove", "role"],
         "Create GitHub issue": [],
     }
     # Payloads must serialise (catches invalid option definitions).

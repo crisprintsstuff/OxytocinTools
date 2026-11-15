@@ -6,7 +6,7 @@ import discord
 import pytest
 
 from bot.checks import UserError, can_create_issue
-from bot.cogs.issues import Issues, _title_from, format_issue_body, neutralize_mentions
+from bot.cogs.issues import Issues, format_issue_body, neutralize_mentions, title_from as _title_from
 from bot.config import Config
 from bot.db import Database
 from bot.github import GitHubError

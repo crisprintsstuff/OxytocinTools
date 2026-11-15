@@ -12,6 +12,7 @@ from .checks import NotBotAdmin, UserError
 from .config import Config
 from .dashboards import DashboardManager, RefreshButton, ReportButton
 from .db import Database
+from .watches import CloseFiledButton, WatchManager
 from .embeds import build_embeds
 from .github import GitHubClient, GitHubError
 from .models import Route
@@ -20,7 +21,7 @@ from .poller import Poller
 log = logging.getLogger("bot")
 
 EXTENSIONS = ("bot.cogs.repos", "bot.cogs.routes", "bot.cogs.admin", "bot.cogs.issues",
-              "bot.cogs.dashboards")
+              "bot.cogs.dashboards", "bot.cogs.watches")
 
 
 class TrackerBot(commands.Bot):
@@ -28,9 +29,12 @@ class TrackerBot(commands.Bot):
     github: GitHubClient
     poller: Poller
     dashboards: DashboardManager
+    watches: WatchManager
 
-    def __init__(self, config: Config):
-        intents = discord.Intents.default()  # no privileged intents needed
+    def __init__(self, config: Config, *, message_content: bool = True):
+        intents = discord.Intents.default()
+        # Privileged: needed to read messages for role-mention and forum watches.
+        intents.message_content = message_content
         super().__init__(command_prefix=commands.when_mentioned, intents=intents,
                          help_command=None)
         self.config = config
@@ -46,13 +50,14 @@ class TrackerBot(commands.Bot):
             raise SystemExit(str(exc)) from exc
         await self.github.start()
         self.dashboards = DashboardManager(self)
+        self.watches = WatchManager(self)
         self.poller = Poller(self.db, self.github, self.deliver,
                              interval=self.config.poll_interval,
                              wait_until_ready=self.wait_until_ready,
-                             after_cycle=self.dashboards.refresh_all,
+                             after_cycle=self.after_poll,
                              release_notes_wait=self.config.release_notes_wait * 60)
         # Dashboard buttons keep working after restarts: their IDs encode the dashboard.
-        self.add_dynamic_items(ReportButton, RefreshButton)
+        self.add_dynamic_items(ReportButton, RefreshButton, CloseFiledButton)
         for ext in EXTENSIONS:
             await self.load_extension(ext)
         self.tree.on_error = self.on_app_command_error
@@ -110,8 +115,25 @@ class TrackerBot(commands.Bot):
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
         removed = await self.db.remove_routes_for_channel(channel.id)
         removed += await self.db.remove_dashboards_for_channel(channel.id)
+        removed += await self.db.remove_watches_for_channel(channel.id)
         if removed:
             log.info("Channel %s deleted; removed %d route(s)/dashboard(s)", channel.id, removed)
+
+    async def after_poll(self) -> None:
+        await self.dashboards.refresh_all()
+        await self.watches.sync_threads()
+
+    async def on_message(self, message: discord.Message) -> None:
+        try:
+            await self.watches.on_message(message)
+        except Exception:
+            log.exception("Failed to handle message %s", message.id)
+
+    async def on_thread_create(self, thread: discord.Thread) -> None:
+        try:
+            await self.watches.on_thread_create(thread)
+        except Exception:
+            log.exception("Failed to handle new thread %s", thread.id)
 
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
         await self.dashboards.message_deleted(payload.message_id)
@@ -187,5 +209,10 @@ class TrackerBot(commands.Bot):
 def run() -> None:
     config = Config.from_env()
     discord.utils.setup_logging(level=getattr(logging, config.log_level, logging.INFO))
-    bot = TrackerBot(config)
-    bot.run(config.discord_token, log_handler=None)
+    try:
+        TrackerBot(config).run(config.discord_token, log_handler=None)
+    except discord.PrivilegedIntentsRequired:
+        log.error("The Message Content Intent is off, so watches (/watch) can't read messages. "
+                  "Turn it on in the Discord Developer Portal: your app > Bot > Privileged "
+                  "Gateway Intents > Message Content Intent. Starting without it for now.")
+        TrackerBot(config, message_content=False).run(config.discord_token, log_handler=None)

@@ -271,6 +271,26 @@ class GitHubClient:
         status, data, new_etag = await self._get(f"/repos/{owner}/{name}/issues", params, etag)
         return (None if status == 304 else data), new_etag
 
+    async def get_issue(self, owner: str, name: str, number: int,
+                        etag: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+        """Fetch one issue. Returns (None, etag) when unchanged since ``etag``."""
+        status, data, new_etag = await self._get(f"/repos/{owner}/{name}/issues/{number}", etag=etag)
+        return (None if status == 304 else data), new_etag
+
+    async def close_issue(self, owner: str, name: str, number: int,
+                          reason: str = "not_planned") -> dict[str, Any]:
+        _, data, _ = await self._request("PATCH", f"/repos/{owner}/{name}/issues/{number}",
+                                         json={"state": "closed", "state_reason": reason})
+        return data
+
+    async def comment_issue(self, owner: str, name: str, number: int, body: str) -> None:
+        await self._request("POST", f"/repos/{owner}/{name}/issues/{number}/comments",
+                            json={"body": body})
+
+    async def list_labels(self, owner: str, name: str) -> list[dict[str, Any]]:
+        _, data, _ = await self._get(f"/repos/{owner}/{name}/labels", {"per_page": 100})
+        return data
+
     async def get_branch(self, owner: str, name: str, branch: str) -> dict[str, Any]:
         _, data, _ = await self._get(f"/repos/{owner}/{name}/branches/{quote(branch, safe='')}")
         return data
