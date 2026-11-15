@@ -10,6 +10,7 @@ pre-releases to `#beta-testers`, `v2.*` tags to `#v2`, and so on.
 - Per-route filters: stable vs. pre-release, tag pattern (glob or regex), and branch for commits
 - Optional role ping per route, and auto-publish in announcement channels
 - Live issue dashboards: one message per repo that stays up to date, with a Report button
+- **Watches:** mention a role like `@bug-report`, or post in a forum channel, and the bot files the GitHub issue for you
 - Create issues with `/issue create` or by right-clicking a message, with configurable access and a cooldown
 - Admin permissions: **Manage Server**, a configurable bot admin role, or owner IDs
 - Works across many servers; each GitHub feed is fetched once per cycle no matter how many servers use it
@@ -23,17 +24,19 @@ pre-releases to `#beta-testers`, `v2.*` tags to `#v2`, and so on.
 ### 1. Create the Discord application
 
 1. Go to <https://discord.com/developers/applications>, click **New Application**, open **Bot**, and copy the token.
-2. No privileged intents are needed.
+2. On the same **Bot** page, under **Privileged Gateway Intents**, turn on **Message Content Intent**.
+   Watches (`/watch`) need it to read the messages they turn into issues. Everything else
+   works without it, and if it's off the bot starts anyway and logs a reminder.
 3. Invite the bot. Replace `CLIENT_ID` with the application ID:
 
    ```
-   https://discord.com/oauth2/authorize?client_id=CLIENT_ID&scope=bot+applications.commands&permissions=150528
+   https://discord.com/oauth2/authorize?client_id=CLIENT_ID&scope=bot+applications.commands&permissions=292058000448
    ```
 
-   That grants View Channels, Send Messages, Embed Links and Mention All Roles.
-   Mention All Roles is only needed to ping roles that aren't set as mentionable.
-   To let the bot pin dashboards, also give it **Manage Messages** in those channels
-   (or use `permissions=158720` in the link to grant it everywhere).
+   That grants View Channels, Send Messages, Embed Links, Add Reactions, Read Message History,
+   Mention All Roles, Manage Messages (pinning dashboards), and Send Messages in Threads and
+   Manage Threads (replying in and closing forum posts). Already invited the bot with fewer
+   permissions? Open this link again and authorize it to update them.
 
 ### 2. Create a GitHub App (recommended)
 
@@ -180,6 +183,46 @@ Safeguards:
 Issues can only be created in repos where the GitHub App is installed. If GitHub doesn't
 apply some of the labels someone typed, the confirmation message says which ones.
 
+### Watches — `/watch`
+Watches turn Discord messages into GitHub issues without anyone running a command.
+The reporter is credited, and the usual issue-access rules and cooldown apply.
+
+| Command | Description |
+|---|---|
+| 🔒 `/watch role <role> <repo> [label] [channel]` | Messages that mention `role` become issues in `repo`, with `label`. Optionally only in one channel (and its threads). |
+| 🔒 `/watch forum <forum> <repo> [label] [close_posts]` | Every new post in a forum channel becomes an issue. |
+| 🔒 `/watch list` / `/watch remove <watch>` | Show or stop watches. |
+
+**Role mentions**
+- *"@bug-report Brush stutters on 4K screens…"* becomes an issue. The first line (without the
+  mention) is the title, the whole message is the description, and attachments and a link back
+  to the message are included.
+- **Reply** to someone's message with the mention to file *their* message: they're the
+  reporter, you're credited as the person who filed it, and anything else you wrote is added
+  as a note.
+- The bot replies with a link to the issue, an **Open on GitHub** button and a **Not an issue**
+  button, and reacts ✅. Pressing **Not an issue** (the reporter, the person who filed it, or
+  an admin) closes the issue on GitHub as *not planned* and leaves a comment saying who did it.
+- A bare mention with no text is ignored, and editing a message never files it again.
+- If someone isn't allowed to file in that repo (see `/admin issue-access`) or is on cooldown,
+  the bot replies with the reason and deletes the reply after 30 seconds.
+
+**Tip: use a role nobody has.** A role must be mentionable for regular members to trigger it,
+and mentioning a role pings everyone who has it. Create roles like `@bug-report` and
+`@feature-request`, turn on **Allow anyone to @mention this role**, and don't give them to anyone:
+they work as triggers and notify nobody.
+
+**Forum channels**
+- The post title becomes the issue title, and the post's first message becomes the description.
+- Post **tags** that match one of the repo's GitHub labels (ignoring case) are added as labels, so
+  forum tags *Bug* and *Enhancement* map to the `bug` and `enhancement` labels. Tags without a
+  matching label are skipped.
+- The bot replies in the post with the issue link and the **Not an issue** button.
+- With `close_posts` on (the default), when the issue is closed on GitHub the bot posts a note
+  in the thread, then closes and locks it. If the issue was *completed* and the forum has a tag
+  named **Solved** (or Resolved, Fixed, Done), that tag is added too. This needs **Manage Threads**.
+- Forum posts skip the per-user cooldown; use the forum's slowmode if you need one.
+
 ### Issue dashboards — `/dashboard`
 A dashboard is one message in a channel that the bot keeps editing, so it always shows a
 repo's current issues. The channel doesn't fill up with new posts.
@@ -260,6 +303,15 @@ something actually changed, and unchanged GitHub data doesn't use up your rate l
 /dashboard create  repo:crisprintsstuff/OxyBrush  channel:#ideas  label:enhancement
 ```
 
+## Example: reporting without commands
+
+```
+/watch role   role:@bug-report       repo:crisprintsstuff/OxyBrush  label:bug
+/watch role   role:@feature-request  repo:crisprintsstuff/OxyBrush  label:enhancement
+/watch forum  forum:#oxybrush-reports  repo:crisprintsstuff/OxyBrush
+/admin issue-access  level:Everyone  repo:crisprintsstuff/OxyBrush
+```
+
 ## How it works
 
 Every `POLL_INTERVAL` seconds the bot collects every feed that has at least one enabled
@@ -303,6 +355,7 @@ bot/
   embeds.py    Discord embed formatting
   checks.py    admin permission check
   dashboards.py  live issue dashboards: rendering, refreshing, buttons
-  cogs/        slash commands: repos.py, routes.py, issues.py, dashboards.py, admin.py
+  watches.py   role-mention and forum watches that file issues, and closing forum posts
+  cogs/        slash commands: repos.py, routes.py, issues.py, dashboards.py, watches.py, admin.py
 tests/
 ```

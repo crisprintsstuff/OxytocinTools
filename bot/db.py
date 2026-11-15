@@ -5,7 +5,7 @@ from typing import Any, Iterable
 
 import aiosqlite
 
-from .models import Dashboard, Repo, Route
+from .models import Dashboard, Filing, Repo, Route, Watch
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS guild_settings (
@@ -59,6 +59,38 @@ CREATE TABLE IF NOT EXISTS dashboards (
 );
 
 CREATE INDEX IF NOT EXISTS dashboards_message ON dashboards (message_id);
+
+-- Role mentions / forum channels that turn Discord messages into GitHub issues.
+CREATE TABLE IF NOT EXISTS watches (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id       INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    kind          TEXT    NOT NULL,          -- role | forum
+    role_id       INTEGER,                   -- role watches
+    channel_id    INTEGER,                   -- forum channel, or a role watch's only channel
+    label         TEXT,
+    close_threads INTEGER NOT NULL DEFAULT 1,
+    created_by    INTEGER,
+    created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Messages that were turned into issues (one per message and repo).
+CREATE TABLE IF NOT EXISTS filings (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id       INTEGER NOT NULL,
+    repo_id          INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    guild_id         INTEGER NOT NULL,
+    channel_id       INTEGER NOT NULL,
+    thread_id        INTEGER,                -- forum post this issue belongs to
+    issue_number     INTEGER NOT NULL,
+    issue_url        TEXT    NOT NULL,
+    reporter_id      INTEGER NOT NULL,
+    filer_id         INTEGER NOT NULL,
+    reply_message_id INTEGER,
+    close_thread     INTEGER NOT NULL DEFAULT 0,
+    state            TEXT    NOT NULL DEFAULT 'open',
+    created_at       TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (message_id, repo_id)
+);
 
 -- Polling state is shared by every server tracking the same repo, so each
 -- GitHub feed is fetched once per cycle no matter how many servers use it.
@@ -345,6 +377,111 @@ class Database:
         cur = await self.conn.execute("DELETE FROM dashboards WHERE channel_id = ?", (channel_id,))
         await self.conn.commit()
         return cur.rowcount
+
+    # ------------------------------------------------------------------- watches
+    _WATCH_SELECT = (
+        "SELECT w.id, w.repo_id, p.guild_id, p.owner, p.name, w.kind, w.role_id, w.channel_id, "
+        "w.label, w.close_threads FROM watches w JOIN repos p ON p.id = w.repo_id"
+    )
+
+    @staticmethod
+    def _watch(row: Iterable[Any]) -> Watch:
+        values = list(row)
+        values[9] = bool(values[9])
+        return Watch(*values)
+
+    async def add_watch(self, repo: Repo, kind: str, *, role_id: int | None = None,
+                        channel_id: int | None = None, label: str | None = None,
+                        close_threads: bool = True, created_by: int | None = None) -> Watch:
+        cur = await self.conn.execute(
+            "INSERT INTO watches (repo_id, kind, role_id, channel_id, label, close_threads, "
+            "created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (repo.id, kind, role_id, channel_id, label, int(close_threads), created_by),
+        )
+        await self.conn.commit()
+        watch = await self.get_watch(repo.guild_id, cur.lastrowid)
+        assert watch is not None
+        return watch
+
+    async def get_watch(self, guild_id: int, watch_id: int) -> Watch | None:
+        async with self.conn.execute(self._WATCH_SELECT + " WHERE w.id = ? AND p.guild_id = ?",
+                                     (watch_id, guild_id)) as cur:
+            row = await cur.fetchone()
+        return self._watch(row) if row else None
+
+    async def list_watches(self, guild_id: int, kind: str | None = None) -> list[Watch]:
+        sql, params = self._WATCH_SELECT + " WHERE p.guild_id = ?", [guild_id]
+        if kind:
+            sql += " AND w.kind = ?"
+            params.append(kind)
+        sql += " ORDER BY w.id"
+        async with self.conn.execute(sql, params) as cur:
+            return [self._watch(row) for row in await cur.fetchall()]
+
+    async def remove_watch(self, watch_id: int) -> None:
+        await self.conn.execute("DELETE FROM watches WHERE id = ?", (watch_id,))
+        await self.conn.commit()
+
+    async def remove_watches_for_channel(self, channel_id: int) -> int:
+        cur = await self.conn.execute("DELETE FROM watches WHERE channel_id = ?", (channel_id,))
+        await self.conn.commit()
+        return cur.rowcount
+
+    # ------------------------------------------------------------------- filings
+    _FILING_SELECT = (
+        "SELECT f.id, f.message_id, f.repo_id, f.guild_id, p.owner, p.name, f.channel_id, "
+        "f.thread_id, f.issue_number, f.issue_url, f.reporter_id, f.filer_id, "
+        "f.reply_message_id, f.close_thread, f.state FROM filings f JOIN repos p ON p.id = f.repo_id"
+    )
+
+    @staticmethod
+    def _filing(row: Iterable[Any]) -> Filing:
+        values = list(row)
+        values[13] = bool(values[13])
+        return Filing(*values)
+
+    async def add_filing(self, *, message_id: int, repo: Repo, channel_id: int,
+                         thread_id: int | None, issue: dict[str, Any], reporter_id: int,
+                         filer_id: int, close_thread: bool) -> Filing:
+        cur = await self.conn.execute(
+            "INSERT INTO filings (message_id, repo_id, guild_id, channel_id, thread_id, "
+            "issue_number, issue_url, reporter_id, filer_id, close_thread) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (message_id, repo.id, repo.guild_id, channel_id, thread_id, issue["number"],
+             issue["html_url"], reporter_id, filer_id, int(close_thread)),
+        )
+        await self.conn.commit()
+        filing = await self.get_filing(cur.lastrowid)
+        assert filing is not None
+        return filing
+
+    async def get_filing(self, filing_id: int) -> Filing | None:
+        async with self.conn.execute(self._FILING_SELECT + " WHERE f.id = ?", (filing_id,)) as cur:
+            row = await cur.fetchone()
+        return self._filing(row) if row else None
+
+    async def find_filing(self, message_id: int, repo_id: int) -> Filing | None:
+        async with self.conn.execute(self._FILING_SELECT + " WHERE f.message_id = ? AND f.repo_id = ?",
+                                     (message_id, repo_id)) as cur:
+            row = await cur.fetchone()
+        return self._filing(row) if row else None
+
+    async def open_thread_filings(self) -> list[Filing]:
+        """Forum posts whose thread should close when their issue does."""
+        async with self.conn.execute(
+            self._FILING_SELECT + " WHERE f.thread_id IS NOT NULL AND f.close_thread = 1 "
+            "AND f.state = 'open' AND f.created_at > datetime('now', '-180 days')"
+        ) as cur:
+            return [self._filing(row) for row in await cur.fetchall()]
+
+    async def set_filing_reply(self, filing_id: int, reply_message_id: int) -> None:
+        await self.conn.execute("UPDATE filings SET reply_message_id = ? WHERE id = ?",
+                                (reply_message_id, filing_id))
+        await self.conn.commit()
+
+    async def set_filing_state(self, filing_id: int, state: str) -> None:
+        await self.conn.execute("UPDATE filings SET state = ? WHERE id = ?", (state, filing_id))
+        await self.conn.commit()
 
     # ------------------------------------------------------------------- streams
     async def get_stream(self, repo: str, stream: str) -> dict[str, Any] | None:

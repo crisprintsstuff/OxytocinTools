@@ -32,7 +32,8 @@ def neutralize_mentions(text: str) -> str:
 def format_issue_body(body: str, *, reporter: str, reporter_username: str, guild: str,
                       channel: str | None, message_url: str | None = None,
                       message_author: str | None = None,
-                      attachments: list[tuple[str, str]] | None = None) -> str:
+                      attachments: list[tuple[str, str]] | None = None,
+                      filed_by: str | None = None) -> str:
     """Build the GitHub issue body: the user's text plus a footer saying where it came from."""
     parts = [body.strip() or "_No description provided._"]
     if attachments:
@@ -44,11 +45,31 @@ def format_issue_body(body: str, *, reporter: str, reporter_username: str, guild
         footer += f". [Original message]({message_url}) by **{message_author}**"
     elif message_url:
         footer += f". [Original message]({message_url})"
+    if filed_by:
+        footer += f". Filed by **{filed_by}**"
     parts.append("---\n<sub>" + neutralize_mentions(footer) + "</sub>")
     return "\n\n".join(parts)
 
 
-def _title_from(text: str) -> str:
+def github_issue_error(bot, repo: Repo, exc: GitHubError) -> UserError | None:
+    """Turn a GitHub error from creating an issue into a message for the user, if we can."""
+    if isinstance(exc, NotFound):
+        return UserError(f"The bot can't see **{repo.full_name}** on GitHub. "
+                         + access_hint(bot, repo.full_name))
+    if exc.status == 410:
+        return UserError(f"Issues are turned off for **{repo.full_name}** on GitHub.")
+    if exc.status in (401, 403):
+        if bot.github.auth_mode == "anonymous":
+            return UserError("Creating issues needs a GitHub App to be configured for the bot.")
+        return UserError(
+            f"The bot isn't allowed to create issues in **{repo.full_name}**. "
+            "Its GitHub App needs the *Issues: Read and write* permission, and the "
+            "new permission must be accepted on the installation. "
+            + access_hint(bot, repo.full_name))
+    return None
+
+
+def title_from(text: str) -> str:
     first = next((line.strip() for line in text.splitlines() if line.strip()), "")
     return truncate(first.lstrip("#>*-_ ").strip(), 100)
 
@@ -128,21 +149,32 @@ class Issues(commands.GroupCog, group_name="issue",
         repos = await self.bot.db.list_repos(interaction.guild.id)
         return [r for r in repos if (await can_create_issue(interaction, r))[0]]
 
-    async def check_cooldown(self, interaction: discord.Interaction) -> None:
+    def cooldown_remaining(self, guild_id: int, user_id: int) -> float:
+        """Seconds until this user may create another issue (0 = now). Ignores admin status."""
         cooldown = self.bot.config.issue_cooldown
-        if not cooldown or await is_admin(interaction):
+        last = self._last_issue.get((guild_id, user_id))
+        if not cooldown or last is None:  # never created one: don't treat as time 0
+            return 0.0                    # (monotonic time starts at boot)
+        return max(0.0, last + cooldown - time.monotonic())
+
+    async def check_cooldown(self, interaction: discord.Interaction) -> None:
+        if await is_admin(interaction):
             return
-        key = (interaction.guild_id or 0, interaction.user.id)
-        last = self._last_issue.get(key)
-        if last is None:  # never created one (don't treat as time 0: monotonic starts at boot)
-            return
-        remaining = last + cooldown - time.monotonic()
+        remaining = self.cooldown_remaining(interaction.guild_id or 0, interaction.user.id)
         if remaining > 0:
             raise UserError(f"Slow down! You can create another issue in {int(remaining) + 1}s.")
 
+    def issue_created(self, repo: Repo, guild_id: int, user_id: int, issue: dict) -> None:
+        """Bookkeeping after any issue is created from Discord (form, message or watch)."""
+        self._last_issue[(guild_id, user_id)] = time.monotonic()
+        log.info("User %s created issue %s#%s", user_id, repo.full_name, issue["number"])
+        dashboards = getattr(self.bot, "dashboards", None)
+        if dashboards is not None:  # show the new issue on this repo's dashboards right away
+            asyncio.create_task(dashboards.refresh_repo(repo.guild_id, repo.id))
+
     def modal_for_message(self, repo: Repo, message: discord.Message) -> IssueModal:
         content = message.clean_content
-        return IssueModal(self, repo, title=_title_from(content), body=content, source=message)
+        return IssueModal(self, repo, title=title_from(content), body=content, source=message)
 
     async def submit(self, interaction: discord.Interaction, repo: Repo, title: str, body: str,
                      labels_raw: str, source: discord.Message | None) -> None:
@@ -171,26 +203,9 @@ class Issues(commands.GroupCog, group_name="issue",
 
         try:
             issue = await self.bot.github.create_issue(repo.owner, repo.name, title, full_body, labels)
-        except NotFound:
-            raise UserError(f"The bot can't see **{repo.full_name}** on GitHub. "
-                            + access_hint(self.bot, repo.full_name))
         except GitHubError as exc:
-            if exc.status == 410:
-                raise UserError(f"Issues are turned off for **{repo.full_name}** on GitHub.")
-            if exc.status in (401, 403):
-                if self.bot.github.auth_mode == "anonymous":
-                    raise UserError("Creating issues needs a GitHub App to be configured for the bot.")
-                raise UserError(
-                    f"The bot isn't allowed to create issues in **{repo.full_name}**. "
-                    "Its GitHub App needs the *Issues: Read and write* permission, and the "
-                    "new permission must be accepted on the installation. "
-                    + access_hint(self.bot, repo.full_name))
-            raise
-        self._last_issue[(interaction.guild_id or 0, user.id)] = time.monotonic()
-        log.info("User %s created issue %s#%s", user.id, repo.full_name, issue["number"])
-        dashboards = getattr(self.bot, "dashboards", None)
-        if dashboards is not None:  # show the new issue on this repo's dashboards right away
-            asyncio.create_task(dashboards.refresh_repo(repo.guild_id, repo.id))
+            raise (github_issue_error(self.bot, repo, exc) or exc)
+        self.issue_created(repo, interaction.guild_id or 0, user.id, issue)
 
         embed = discord.Embed(title=truncate(f"#{issue['number']} {issue['title']}", 256),
                               url=issue["html_url"], color=GREEN,

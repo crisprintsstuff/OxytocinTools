@@ -202,3 +202,59 @@ class Dashboard:
 
     def describe(self) -> str:
         return self.full_name + (f" (label `{self.label}`)" if self.label else "")
+
+
+@dataclass
+class Watch:
+    """Turns Discord messages into issues: a role mention, or new posts in a forum channel."""
+    id: int
+    repo_id: int
+    guild_id: int
+    owner: str
+    name: str
+    kind: str                       # "role" | "forum"
+    role_id: int | None = None
+    channel_id: int | None = None
+    label: str | None = None
+    close_threads: bool = True
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.owner}/{self.name}"
+
+    def describe(self) -> str:
+        if self.kind == "role":
+            text = f"<@&{self.role_id}> → **{self.full_name}**"
+            if self.channel_id:
+                text += f" (only in <#{self.channel_id}>)"
+        else:
+            text = f"posts in <#{self.channel_id}> → **{self.full_name}**"
+            if self.close_threads:
+                text += ", closes posts when issues close"
+        if self.label:
+            text += f", label `{self.label}`"
+        return text
+
+
+@dataclass
+class Filing:
+    """A Discord message that was turned into a GitHub issue."""
+    id: int
+    message_id: int
+    repo_id: int
+    guild_id: int
+    owner: str
+    name: str
+    channel_id: int
+    thread_id: int | None
+    issue_number: int
+    issue_url: str
+    reporter_id: int
+    filer_id: int
+    reply_message_id: int | None
+    close_thread: bool
+    state: str
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.owner}/{self.name}"
