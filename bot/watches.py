@@ -10,7 +10,13 @@ from typing import TYPE_CHECKING, Any, Iterable
 import discord
 
 from .checks import UserError, member_can_create_issue, member_is_admin
-from .cogs.issues import format_issue_body, github_issue_error, neutralize_mentions, title_from
+from .cogs.issues import (
+    format_issue_body,
+    github_issue_error,
+    neutralize_mentions,
+    process_attachments,
+    title_from,
+)
 from .embeds import GREEN, truncate
 from .github import GitHubError, RateLimited
 from .models import Filing, Repo, Watch
@@ -194,23 +200,47 @@ class WatchManager:
                 await self._notice(trigger, f"⏳ Slow down! You can file another issue in {int(remaining) + 1}s.")
                 return None
 
+        if source is trigger:
+            raw_attachments = list(getattr(source, "attachments", []))
+        else:
+            seen_att_ids = set()
+            raw_attachments = []
+            for att in [*getattr(source, "attachments", []), *getattr(trigger, "attachments", [])]:
+                att_id = getattr(att, "id", None)
+                if att_id is not None:
+                    if att_id in seen_att_ids:
+                        continue
+                    seen_att_ids.add(att_id)
+                elif att in raw_attachments:
+                    continue
+                raw_attachments.append(att)
+
         text = strip_role_mentions(source.clean_content, role_names)
         note = strip_role_mentions(trigger.clean_content, role_names) if source is not trigger else ""
         if not text and note:
             text, note = note, ""
-        if not text and not source.attachments and thread is None:
+        if not text and not raw_attachments and thread is None:
             return None  # just a bare mention: nothing to file
-        title = (title or "").strip() or title_from(text) or f"Report from {source.author.display_name}"
+        title = (title or "").strip() or title_from(text)
+        if not title:
+            if raw_attachments:
+                first_name = getattr(raw_attachments[0], "filename", None)
+                if not first_name and isinstance(raw_attachments[0], tuple):
+                    first_name = raw_attachments[0][0]
+                title = f"{first_name or 'Attachment'} from {source.author.display_name}"
+            else:
+                title = f"Report from {source.author.display_name}"
         body = text
         if note:
             body += f"\n\n**Note from {filer.display_name}:** {note}"
         if not admin:
             body = neutralize_mentions(body)
+        attachments = await process_attachments(bot, repo, raw_attachments) if raw_attachments else None
         full_body = format_issue_body(
             body, reporter=source.author.display_name, reporter_username=source.author.name,
             guild=guild.name, channel=getattr(trigger.channel, "name", None),
             message_url=source.jump_url,
-            attachments=[(a.filename, a.url) for a in source.attachments],
+            attachments=attachments,
             filed_by=filer.display_name if filer.id != source.author.id else None,
         )
         labels = list(dict.fromkeys(lbl for lbl in [watch.label, *extra_labels] if lbl))

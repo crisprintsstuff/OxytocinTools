@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
 import logging
+import re
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -102,6 +105,7 @@ class GitHubClient:
         self.rate_limits: dict[str, RateLimit] = {}
         self._installations: dict[str, tuple[int | None, float]] = {}
         self._install_tokens: dict[int, tuple[str, float]] = {}
+        self._known_branches: set[tuple[str, str]] = set()
 
     async def start(self) -> None:
         self.session = aiohttp.ClientSession(
@@ -294,6 +298,77 @@ class GitHubClient:
     async def get_branch(self, owner: str, name: str, branch: str) -> dict[str, Any]:
         _, data, _ = await self._get(f"/repos/{owner}/{name}/branches/{quote(branch, safe='')}")
         return data
+
+    async def get_ref(self, owner: str, name: str, ref: str) -> dict[str, Any]:
+        """Fetch a git reference, e.g. ``heads/main``."""
+        ref_path = ref.removeprefix("refs/")
+        _, data, _ = await self._get(f"/repos/{owner}/{name}/git/ref/{ref_path}")
+        return data
+
+    async def create_ref(self, owner: str, name: str, ref: str, sha: str) -> dict[str, Any]:
+        """Create a git reference, e.g. ``refs/heads/discord-attachments``."""
+        full_ref = ref if ref.startswith("refs/") else f"refs/{ref}"
+        _, data, _ = await self._request("POST", f"/repos/{owner}/{name}/git/refs",
+                                         json={"ref": full_ref, "sha": sha})
+        return data
+
+    async def create_file(self, owner: str, name: str, path: str, content: bytes,
+                          message: str, branch: str | None = None) -> dict[str, Any]:
+        """Create or update a file in the repository."""
+        payload: dict[str, Any] = {
+            "message": message,
+            "content": base64.b64encode(content).decode("ascii"),
+        }
+        if branch:
+            payload["branch"] = branch
+        _, data, _ = await self._request("PUT", f"/repos/{owner}/{name}/contents/{path.lstrip('/')}",
+                                         json=payload)
+        return data
+
+    async def upload_attachment(self, owner: str, name: str, default_branch: str,
+                                filename: str, content: bytes) -> str | None:
+        """Upload an attachment to a dedicated branch in the repository.
+
+        Returns the permanent raw content URL, or ``None`` on failure.
+        """
+        if len(content) > 25 * 1024 * 1024:
+            log.warning("Attachment %s is too large (%d bytes) to upload to GitHub", filename, len(content))
+            return None
+
+        repo_key = f"{owner}/{name}".lower()
+        branch = "discord-attachments"
+        target_branch = branch
+
+        if (repo_key, branch) not in self._known_branches:
+            try:
+                try:
+                    await self.get_ref(owner, name, f"heads/{branch}")
+                    self._known_branches.add((repo_key, branch))
+                except NotFound:
+                    base_ref = await self.get_ref(owner, name, f"heads/{default_branch}")
+                    sha = base_ref["object"]["sha"]
+                    await self.create_ref(owner, name, f"refs/heads/{branch}", sha)
+                    self._known_branches.add((repo_key, branch))
+            except Exception as exc:
+                log.debug("Couldn't ensure branch %s in %s/%s (%s); trying %s",
+                          branch, owner, name, exc, default_branch)
+                target_branch = default_branch
+
+        clean_name = re.sub(r"[^\w.-]", "_", filename).lstrip(".")
+        if not clean_name:
+            clean_name = "attachment"
+        path = f"attachments/{int(time.time())}_{uuid.uuid4().hex[:8]}_{clean_name}"
+        commit_msg = f"Upload {clean_name} from Discord"
+        try:
+            data = await self.create_file(owner, name, path, content, commit_msg, branch=target_branch)
+            content_info = data.get("content", {})
+            download_url = content_info.get("download_url")
+            if download_url:
+                return download_url
+            return f"https://raw.githubusercontent.com/{owner}/{name}/{target_branch}/{path}"
+        except Exception as exc:
+            log.warning("Failed to upload attachment %s to %s/%s: %s", filename, owner, name, exc)
+            return None
 
     async def latest_release(self, owner: str, name: str,
                              include_prereleases: bool = False) -> dict[str, Any] | None:

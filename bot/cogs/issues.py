@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _MENTION_RE = re.compile(r"(?<![\w@])@(?=[A-Za-z0-9])")
+IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"}
+VIDEO_EXTENSIONS = {"mp4", "mov", "webm", "mkv", "avi"}
 
 
 def neutralize_mentions(text: str) -> str:
@@ -37,8 +39,24 @@ def format_issue_body(body: str, *, reporter: str, reporter_username: str, guild
     """Build the GitHub issue body: the user's text plus a footer saying where it came from."""
     parts = [body.strip() or "_No description provided._"]
     if attachments:
-        lines = [f"- [{name}]({url})" for name, url in attachments]
-        parts.append("**Attachments** (Discord links may expire):\n" + "\n".join(lines))
+        is_github = lambda u: "github.com" in u or "githubusercontent.com" in u
+        warning = " (Discord links may expire)" if any(not is_github(url) for _, url in attachments) else ""
+        media_blocks = []
+        list_items = []
+        for name, url in attachments:
+            ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            if ext in IMAGE_EXTENSIONS:
+                media_blocks.append(f"[![{name}]({url})]({url})")
+            elif ext in VIDEO_EXTENSIONS:
+                list_items.append(f"- 🎥 [{name}]({url})")
+            else:
+                list_items.append(f"- [{name}]({url})")
+        content_parts = []
+        if media_blocks:
+            content_parts.append("\n\n".join(media_blocks))
+        if list_items:
+            content_parts.append("\n".join(list_items))
+        parts.append(f"**Attachments**{warning}:\n" + "\n\n".join(content_parts))
     where = f"**{guild}**" + (f" #{channel}" if channel else "")
     footer = f"Reported from Discord by **{reporter}** (`{reporter_username}`) in {where}"
     if message_author and message_url:
@@ -49,6 +67,29 @@ def format_issue_body(body: str, *, reporter: str, reporter_username: str, guild
         footer += f". Filed by **{filed_by}**"
     parts.append("---\n<sub>" + neutralize_mentions(footer) + "</sub>")
     return "\n\n".join(parts)
+
+
+async def process_attachments(bot: Any, repo: Repo, attachments: Any) -> list[tuple[str, str]]:
+    """Download attachments and upload them to GitHub if possible, falling back to original URLs."""
+    async def _handle(att: Any) -> tuple[str, str]:
+        if isinstance(att, tuple):
+            filename, url = att[0], att[1]
+        else:
+            filename = getattr(att, "filename", "attachment")
+            url = getattr(att, "url", "")
+        if hasattr(att, "read") and callable(att.read):
+            try:
+                content = await att.read()
+                upload_fn = getattr(getattr(bot, "github", None), "upload_attachment", None)
+                if upload_fn is not None:
+                    hosted_url = await upload_fn(repo.owner, repo.name, repo.default_branch, filename, content)
+                    if hosted_url:
+                        url = hosted_url
+            except Exception as exc:
+                log.warning("Couldn't process attachment %s for %s: %s", filename, repo.full_name, exc)
+        return filename, url
+
+    return list(await asyncio.gather(*(_handle(a) for a in attachments)))
 
 
 def github_issue_error(bot, repo: Repo, exc: GitHubError) -> UserError | None:
@@ -191,13 +232,15 @@ class Issues(commands.GroupCog, group_name="issue",
         admin = await is_admin(interaction)
         user = interaction.user
         channel = getattr(interaction.channel, "name", None)
+        raw_attachments = list(source.attachments) if source else []
+        attachments = await process_attachments(self.bot, repo, raw_attachments) if raw_attachments else None
         full_body = format_issue_body(
             body if admin else neutralize_mentions(body),
             reporter=user.display_name, reporter_username=user.name,
             guild=interaction.guild.name if interaction.guild else "Discord", channel=channel,
             message_url=source.jump_url if source else None,
             message_author=source.author.display_name if source else None,
-            attachments=[(a.filename, a.url) for a in source.attachments] if source else None,
+            attachments=attachments,
         )
         labels = [label.strip() for label in labels_raw.split(",") if label.strip()][:10]
 

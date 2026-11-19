@@ -102,6 +102,37 @@ async def test_reply_files_the_original_message(db):
     assert (filing.reporter_id, filing.filer_id) == (6, 7)
 
 
+async def test_reply_with_attachments_includes_media(db):
+    manager, bot, repo, _ = await setup(db)
+    bob, mod = member(6, "Bob"), member(7, "Mod")
+    pic = SimpleNamespace(id=101, filename="screenshot.png", url="https://cdn/screenshot.png")
+    vid = SimpleNamespace(id=102, filename="demo.mp4", url="https://cdn/demo.mp4")
+    original = message(2, bob, "the export crashes", roles=(), attachments=[pic])
+    trigger = message(3, mod, "@bug-report",
+                      reference=SimpleNamespace(message_id=2, channel_id=50, resolved=original),
+                      attachments=[vid])
+    await manager.on_message(trigger)
+
+    _, _, title, body, _ = bot.github.create_issue.call_args.args
+    assert title == "the export crashes"
+    assert "[![screenshot.png](https://cdn/screenshot.png)]" in body
+    assert "- 🎥 [demo.mp4](https://cdn.discordapp.com/attachments/..." not in body
+    assert "- 🎥 [demo.mp4](https://cdn/demo.mp4)" in body
+
+
+async def test_mention_with_attachment_only_creates_issue(db):
+    manager, bot, repo, _ = await setup(db)
+    alice = member(5, "Alice")
+    pic = SimpleNamespace(id=201, filename="ui_bug.png", url="https://cdn/ui_bug.png")
+    msg = message(1, alice, "@bug-report", attachments=[pic])
+    await manager.on_message(msg)
+
+    assert bot.github.create_issue.await_count == 1
+    _, _, title, body, _ = bot.github.create_issue.call_args.args
+    assert title == "ui_bug.png from Alice"
+    assert "[![ui_bug.png](https://cdn/ui_bug.png)]" in body
+
+
 async def test_ignored_and_refused(db):
     manager, bot, _, _ = await setup(db, channel_id=77)
     alice = member(5, "Alice")

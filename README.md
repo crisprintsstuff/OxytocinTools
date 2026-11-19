@@ -55,7 +55,7 @@ later. No per-repo invites are needed. Issues it creates show as opened by
    - **Repository permissions**:
      | Permission | Access |
      |---|---|
-     | Contents | Read-only (releases and commits) |
+     | Contents | Read-only (or **Read and write** to permanently re-host Discord attachments) |
      | Issues | **Read and write** (Read-only if you don't want issue creation) |
      | Pull requests | Read-only |
      | Metadata | Read-only (selected automatically) |
@@ -197,13 +197,17 @@ The reporter is credited, and the usual issue-access rules and cooldown apply.
 - *"@bug-report Brush stutters on 4K screens…"* becomes an issue. The first line (without the
   mention) is the title, the whole message is the description, and attachments and a link back
   to the message are included.
+- **Pictures, videos, and files** attached to the message or reply are included. Images are
+  rendered inline directly in the GitHub issue. When the GitHub App has *Contents: Read and write*
+  permission, attachments are automatically re-hosted on a `discord-attachments` branch so they
+  never expire.
 - **Reply** to someone's message with the mention to file *their* message: they're the
-  reporter, you're credited as the person who filed it, and anything else you wrote is added
-  as a note.
+  reporter, you're credited as the person who filed it, attachments from both messages are
+  included, and anything else you wrote is added as a note.
 - The bot replies with a link to the issue, an **Open on GitHub** button and a **Not an issue**
   button, and reacts ✅. Pressing **Not an issue** (the reporter, the person who filed it, or
   an admin) closes the issue on GitHub as *not planned* and leaves a comment saying who did it.
-- A bare mention with no text is ignored, and editing a message never files it again.
+- A bare mention with no text or attachments is ignored, and editing a message never files it again.
 - If someone isn't allowed to file in that repo (see `/admin issue-access`) or is on cooldown,
   the bot replies with the reason and deletes the reply after 30 seconds.
 

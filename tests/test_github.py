@@ -39,11 +39,37 @@ async def aiohttp_server_factory():
                                   "labels": [{"name": n} for n in payload.get("labels", [])]},
                                  status=201)
 
+    async def git_ref(request):
+        ref = request.match_info["ref"]
+        if ref == "heads/discord-attachments":
+            return web.json_response({"message": "Not Found"}, status=404)
+        if ref == "heads/main":
+            return web.json_response({"ref": "refs/heads/main", "object": {"sha": "sha123"}})
+        return web.json_response({"message": "Not Found"}, status=404)
+
+    async def create_git_ref(request):
+        payload = await request.json()
+        return web.json_response({"ref": payload["ref"], "object": {"sha": payload["sha"]}}, status=201)
+
+    async def put_content(request):
+        payload = await request.json()
+        path = request.match_info["path"]
+        return web.json_response({
+            "content": {
+                "name": path.split("/")[-1],
+                "path": path,
+                "download_url": f"https://raw.githubusercontent.com/o/r/{payload.get('branch', 'main')}/{path}",
+            }
+        }, status=201)
+
     app = web.Application()
     app.router.add_post("/repos/o/r/issues", create_issue)
     app.router.add_get("/repos/o/r/releases", releases)
     app.router.add_get("/repos/o/r/issues", issues)
     app.router.add_get("/repos/o/limited/releases", limited)
+    app.router.add_get("/repos/o/r/git/ref/{ref:.+}", git_ref)
+    app.router.add_post("/repos/o/r/git/refs", create_git_ref)
+    app.router.add_put("/repos/o/r/contents/{path:.+}", put_content)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -83,3 +109,19 @@ async def test_not_found_and_rate_limit(gh):
 async def test_create_issue(gh):
     issue = await gh.create_issue("o", "r", "Title", "Body", ["bug"])
     assert issue["number"] == 7 and issue["labels"] == [{"name": "bug"}]
+
+
+async def test_upload_attachment(gh):
+    url = await gh.upload_attachment("o", "r", "main", "screenshot.png", b"fakeimagebytes")
+    assert url is not None
+    assert url.startswith("https://raw.githubusercontent.com/o/r/discord-attachments/attachments/")
+    assert url.endswith("screenshot.png")
+
+    # Second upload re-uses known branch:
+    url2 = await gh.upload_attachment("o", "r", "main", "video.mp4", b"fakevideobytes")
+    assert url2 is not None
+    assert url2.endswith("video.mp4")
+
+    # Huge file is rejected:
+    huge = b"x" * (26 * 1024 * 1024)
+    assert await gh.upload_attachment("o", "r", "main", "huge.bin", huge) is None

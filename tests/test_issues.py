@@ -6,10 +6,17 @@ import discord
 import pytest
 
 from bot.checks import UserError, can_create_issue
-from bot.cogs.issues import Issues, format_issue_body, neutralize_mentions, title_from as _title_from
+from bot.cogs.issues import (
+    Issues,
+    format_issue_body,
+    neutralize_mentions,
+    process_attachments,
+    title_from as _title_from,
+)
 from bot.config import Config
 from bot.db import Database
 from bot.github import GitHubError
+from bot.models import Repo
 
 
 def member(*, manage=False, roles=(), user_id=5):
@@ -87,6 +94,49 @@ def test_issue_body_and_title():
     assert format_issue_body("  ", reporter="a", reporter_username="a", guild="g",
                              channel=None).startswith("_No description provided._")
     assert _title_from("\n## Crash on start\nmore") == "Crash on start"
+
+
+def test_format_issue_body_images_and_videos():
+    body = format_issue_body(
+        "Look at this", reporter="Alice", reporter_username="alice", guild="Srv", channel="bugs",
+        attachments=[
+            ("screenshot.png", "https://cdn.discordapp.com/attachments/1/2/screenshot.png"),
+            ("demo.mp4", "https://cdn.discordapp.com/attachments/1/2/demo.mp4"),
+            ("notes.txt", "https://cdn.discordapp.com/attachments/1/2/notes.txt"),
+        ],
+    )
+    assert "**Attachments** (Discord links may expire):" in body
+    assert "[![screenshot.png](https://cdn.discordapp.com/attachments/1/2/screenshot.png)](https://cdn.discordapp.com/attachments/1/2/screenshot.png)" in body
+    assert "- 🎥 [demo.mp4](https://cdn.discordapp.com/attachments/1/2/demo.mp4)" in body
+    assert "- [notes.txt](https://cdn.discordapp.com/attachments/1/2/notes.txt)" in body
+
+    # When all attachments are hosted on GitHub, the expiry warning is omitted:
+    body_hosted = format_issue_body(
+        "Hosted", reporter="Alice", reporter_username="alice", guild="Srv", channel="bugs",
+        attachments=[
+            ("screenshot.png", "https://raw.githubusercontent.com/o/r/discord-attachments/attachments/screenshot.png"),
+        ],
+    )
+    assert "**Attachments**:" in body_hosted
+    assert "(Discord links may expire)" not in body_hosted
+    assert "[![screenshot.png](https://raw.githubusercontent.com/o/r/discord-attachments/attachments/screenshot.png)]" in body_hosted
+
+
+async def test_process_attachments():
+    repo = Repo(1, 1, "o", "r", "main")
+    bot = SimpleNamespace(github=SimpleNamespace(
+        upload_attachment=AsyncMock(return_value="https://raw.githubusercontent.com/o/r/discord-attachments/attachments/pic.png")
+    ))
+    att1 = SimpleNamespace(filename="pic.png", url="https://cdn/pic.png", read=AsyncMock(return_value=b"pngdata"))
+    att2 = SimpleNamespace(filename="fail.png", url="https://cdn/fail.png", read=AsyncMock(side_effect=RuntimeError("disk error")))
+    att3 = ("plain.txt", "https://cdn/plain.txt")
+
+    results = await process_attachments(bot, repo, [att1, att2, att3])
+    assert results == [
+        ("pic.png", "https://raw.githubusercontent.com/o/r/discord-attachments/attachments/pic.png"),
+        ("fail.png", "https://cdn/fail.png"),
+        ("plain.txt", "https://cdn/plain.txt"),
+    ]
 
 
 async def test_submit_creates_issue_and_enforces_cooldown(db):
