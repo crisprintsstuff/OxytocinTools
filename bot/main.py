@@ -12,6 +12,7 @@ from .checks import NotBotAdmin, UserError
 from .config import Config
 from .dashboards import DashboardManager, RefreshButton, ReportButton
 from .db import Database
+from .prcards import PRCardManager
 from .watches import CloseFiledButton, WatchManager
 from .embeds import build_embeds
 from .github import GitHubClient, GitHubError
@@ -21,7 +22,7 @@ from .poller import Poller
 log = logging.getLogger("bot")
 
 EXTENSIONS = ("bot.cogs.repos", "bot.cogs.routes", "bot.cogs.admin", "bot.cogs.issues",
-              "bot.cogs.dashboards", "bot.cogs.watches")
+              "bot.cogs.dashboards", "bot.cogs.watches", "bot.cogs.prs")
 
 
 class TrackerBot(commands.Bot):
@@ -30,6 +31,7 @@ class TrackerBot(commands.Bot):
     poller: Poller
     dashboards: DashboardManager
     watches: WatchManager
+    prcards: PRCardManager
 
     def __init__(self, config: Config, *, message_content: bool = True):
         intents = discord.Intents.default()
@@ -51,6 +53,7 @@ class TrackerBot(commands.Bot):
         await self.github.start()
         self.dashboards = DashboardManager(self)
         self.watches = WatchManager(self)
+        self.prcards = PRCardManager(self)
         self.poller = Poller(self.db, self.github, self.deliver,
                              interval=self.config.poll_interval,
                              wait_until_ready=self.wait_until_ready,
@@ -116,12 +119,14 @@ class TrackerBot(commands.Bot):
         removed = await self.db.remove_routes_for_channel(channel.id)
         removed += await self.db.remove_dashboards_for_channel(channel.id)
         removed += await self.db.remove_watches_for_channel(channel.id)
+        removed += await self.db.remove_pr_trackers_for_channel(channel.id)
         if removed:
             log.info("Channel %s deleted; removed %d route(s)/dashboard(s)", channel.id, removed)
 
     async def after_poll(self) -> None:
         await self.dashboards.refresh_all()
         await self.watches.sync_threads()
+        await self.prcards.refresh_all()
 
     async def on_message(self, message: discord.Message) -> None:
         try:

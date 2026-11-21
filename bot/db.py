@@ -5,7 +5,7 @@ from typing import Any, Iterable
 
 import aiosqlite
 
-from .models import Dashboard, Filing, Repo, Route, Watch
+from .models import Dashboard, Filing, PRCard, PRTracker, Repo, Route, Watch
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS guild_settings (
@@ -93,6 +93,34 @@ CREATE TABLE IF NOT EXISTS filings (
     state            TEXT    NOT NULL DEFAULT 'open',
     created_at       TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (message_id, repo_id)
+);
+
+-- Live PR cards: a tracker posts one card per open PR in a channel and keeps it updated.
+CREATE TABLE IF NOT EXISTS pr_trackers (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id         INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    channel_id      INTEGER NOT NULL,
+    branch          TEXT,                     -- base branch filter (glob)
+    include_drafts  INTEGER NOT NULL DEFAULT 0,
+    include_bots    INTEGER NOT NULL DEFAULT 0,
+    threads         INTEGER NOT NULL DEFAULT 1,
+    mention_role_id INTEGER,
+    last_error      TEXT,
+    created_by      INTEGER,
+    created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS pr_cards (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    tracker_id  INTEGER NOT NULL REFERENCES pr_trackers(id) ON DELETE CASCADE,
+    number      INTEGER NOT NULL,
+    message_id  INTEGER,
+    thread_id   INTEGER,
+    state       TEXT NOT NULL DEFAULT 'open',  -- open | merged | closed
+    status_json TEXT,                          -- last status, to describe what changed
+    card_hash   TEXT,
+    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (tracker_id, number)
 );
 
 -- Last known state of each pull request, to notice when one is merged, closed, etc.
@@ -547,6 +575,88 @@ class Database:
             (error, repo, stream),
         )
         await self.conn.commit()
+
+    # ------------------------------------------------------------- PR trackers
+    _TRACKER_SELECT = (
+        "SELECT t.id, t.repo_id, p.guild_id, p.owner, p.name, t.channel_id, t.branch, "
+        "t.include_drafts, t.include_bots, t.threads, t.mention_role_id, t.last_error "
+        "FROM pr_trackers t JOIN repos p ON p.id = t.repo_id"
+    )
+
+    @staticmethod
+    def _tracker(row: Iterable[Any]) -> PRTracker:
+        v = list(row)
+        for i in (7, 8, 9):
+            v[i] = bool(v[i])
+        return PRTracker(*v)
+
+    async def add_pr_tracker(self, repo: Repo, channel_id: int, *, branch: str | None,
+                             include_drafts: bool, include_bots: bool, threads: bool,
+                             mention_role_id: int | None, created_by: int | None) -> PRTracker:
+        cur = await self.conn.execute(
+            "INSERT INTO pr_trackers (repo_id, channel_id, branch, include_drafts, include_bots, "
+            "threads, mention_role_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (repo.id, channel_id, branch, int(include_drafts), int(include_bots), int(threads),
+             mention_role_id, created_by))
+        await self.conn.commit()
+        tracker = await self.get_pr_tracker(cur.lastrowid)
+        assert tracker is not None
+        return tracker
+
+    async def get_pr_tracker(self, tracker_id: int, guild_id: int | None = None) -> PRTracker | None:
+        sql, params = self._TRACKER_SELECT + " WHERE t.id = ?", [tracker_id]
+        if guild_id is not None:
+            sql += " AND p.guild_id = ?"
+            params.append(guild_id)
+        async with self.conn.execute(sql, params) as cur:
+            row = await cur.fetchone()
+        return self._tracker(row) if row else None
+
+    async def list_pr_trackers(self, guild_id: int | None = None) -> list[PRTracker]:
+        sql, params = self._TRACKER_SELECT, []
+        if guild_id is not None:
+            sql += " WHERE p.guild_id = ?"
+            params.append(guild_id)
+        async with self.conn.execute(sql + " ORDER BY t.id", params) as cur:
+            return [self._tracker(row) for row in await cur.fetchall()]
+
+    async def set_pr_tracker_error(self, tracker_id: int, error: str | None) -> None:
+        await self.conn.execute("UPDATE pr_trackers SET last_error = ? WHERE id = ?",
+                                (error, tracker_id))
+        await self.conn.commit()
+
+    async def remove_pr_tracker(self, tracker_id: int) -> None:
+        await self.conn.execute("DELETE FROM pr_trackers WHERE id = ?", (tracker_id,))
+        await self.conn.commit()
+
+    async def remove_pr_trackers_for_channel(self, channel_id: int) -> int:
+        cur = await self.conn.execute("DELETE FROM pr_trackers WHERE channel_id = ?", (channel_id,))
+        await self.conn.commit()
+        return cur.rowcount
+
+    async def list_pr_cards(self, tracker_id: int) -> list[PRCard]:
+        async with self.conn.execute(
+            "SELECT id, tracker_id, number, message_id, thread_id, state, status_json, card_hash "
+            "FROM pr_cards WHERE tracker_id = ? ORDER BY number", (tracker_id,)
+        ) as cur:
+            return [PRCard(*row) for row in await cur.fetchall()]
+
+    async def save_pr_card(self, card: PRCard) -> PRCard:
+        if card.id is None:
+            cur = await self.conn.execute(
+                "INSERT INTO pr_cards (tracker_id, number, message_id, thread_id, state, "
+                "status_json, card_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (card.tracker_id, card.number, card.message_id, card.thread_id, card.state,
+                 card.status_json, card.card_hash))
+            card.id = cur.lastrowid
+        else:
+            await self.conn.execute(
+                "UPDATE pr_cards SET message_id = ?, thread_id = ?, state = ?, status_json = ?, "
+                "card_hash = ? WHERE id = ?",
+                (card.message_id, card.thread_id, card.state, card.status_json, card.card_hash,
+                 card.id))
+        await self.conn.commit()
+        return card
 
     # -------------------------------------------------------------- PR tracking
     async def get_pr_baseline(self, repo: str) -> float | None:

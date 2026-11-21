@@ -323,3 +323,58 @@ class Filing:
     @property
     def full_name(self) -> str:
         return f"{self.owner}/{self.name}"
+
+
+@dataclass
+class PRTracker:
+    """Posts a live card for each open pull request of a repo in a channel."""
+    id: int
+    repo_id: int
+    guild_id: int
+    owner: str
+    name: str
+    channel_id: int
+    branch: str | None = None
+    include_drafts: bool = False
+    include_bots: bool = False
+    threads: bool = True
+    mention_role_id: int | None = None
+    last_error: str | None = None
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.owner}/{self.name}"
+
+    def wants(self, pr: dict[str, Any]) -> bool:
+        """Whether an open PR should get a card (filters apply when the card is created)."""
+        if pr.get("draft") and not self.include_drafts:
+            return False
+        if not self.include_bots and (pr.get("user") or {}).get("type") == "Bot":
+            return False
+        return pattern_matches(self.branch, (pr.get("base") or {}).get("ref") or "")
+
+    def describe(self) -> str:
+        parts = [f"**{self.full_name}** → <#{self.channel_id}>"]
+        if self.branch:
+            parts.append(f"into `{self.branch}`")
+        if self.include_drafts:
+            parts.append("incl. drafts")
+        if self.include_bots:
+            parts.append("incl. bots")
+        if not self.threads:
+            parts.append("no threads")
+        if self.mention_role_id:
+            parts.append(f"pings <@&{self.mention_role_id}>")
+        return ", ".join(parts)
+
+
+@dataclass
+class PRCard:
+    id: int | None
+    tracker_id: int
+    number: int
+    message_id: int | None = None
+    thread_id: int | None = None
+    state: str = "open"
+    status_json: str | None = None
+    card_hash: str | None = None
