@@ -56,7 +56,7 @@ EVENT_LABELS = {
     "releases": "Releases",
     "commits": "Commits",
     "issues": "New issues",
-    "pulls": "New pull requests",
+    "pulls": "Pull requests",
 }
 
 _REPO_RE = re.compile(
@@ -75,12 +75,47 @@ def parse_repo(value: str) -> tuple[str, str]:
 
 
 def stream_key(event_type: str, branch: str | None = None) -> str:
-    """Identify the GitHub feed a route listens to. Commits are tracked per branch."""
+    """Identify the GitHub feed a route listens to. Commits are tracked per branch.
+
+    Pull request routes share one ``prs`` feed per repo (their branch is a filter on the
+    PR's base branch, not a separate feed).
+    """
     if event_type == "commits":
         if not branch:
             raise ValueError("commit routes need a branch")
         return f"commits:{branch}"
+    if event_type == "pulls":
+        return "prs"
     return event_type
+
+
+# Pull request lifecycle events a route can post.
+PR_EVENTS = ("opened", "ready", "merged", "closed", "reopened")
+PR_EVENT_LABELS = {
+    "opened": "opened",
+    "ready": "ready for review",
+    "merged": "merged",
+    "closed": "closed",
+    "reopened": "reopened",
+}
+DEFAULT_PR_EVENTS = ("opened", "ready")
+
+
+def parse_pr_events(value: str | None) -> tuple[str, ...]:
+    """Parse ``"opened, merged"`` (or ``all``). Raises ValueError on unknown names."""
+    if value is None or not value.strip():
+        return DEFAULT_PR_EVENTS
+    names = [v.strip().lower() for v in value.replace(" ", ",").split(",") if v.strip()]
+    if names == ["all"]:
+        return PR_EVENTS
+    aliases = {"open": "opened", "ready for review": "ready", "merge": "merged",
+               "close": "closed", "reopen": "reopened"}
+    names = [aliases.get(n, n) for n in names]
+    unknown = [n for n in names if n not in PR_EVENTS]
+    if unknown:
+        raise ValueError(f"Unknown pull request event(s): {', '.join(unknown)}. "
+                         f"Use any of: {', '.join(PR_EVENTS)} (or `all`).")
+    return tuple(e for e in PR_EVENTS if e in names)  # canonical order, no duplicates
 
 
 def pattern_matches(pattern: str | None, value: str) -> bool:
@@ -134,6 +169,9 @@ class Route:
     crosspost: bool = False
     enabled: bool = True
     last_error: str | None = None
+    pr_events: str | None = None       # pulls: comma-separated PR_EVENTS (None = default)
+    include_drafts: bool = False       # pulls: also post about draft PRs
+    include_bots: bool = False         # pulls: also post about PRs opened by bots
 
     @property
     def full_name(self) -> str:
@@ -147,6 +185,13 @@ class Route:
     def stream(self) -> str:
         return stream_key(self.event_type, self.branch)
 
+    @property
+    def pr_event_set(self) -> tuple[str, ...]:
+        try:
+            return parse_pr_events(self.pr_events)
+        except ValueError:
+            return DEFAULT_PR_EVENTS
+
     def accepts(self, item: dict[str, Any]) -> bool:
         """Whether a single GitHub item passes this route's filters."""
         if self.event_type == "releases":
@@ -156,6 +201,16 @@ class Route:
             if self.release_kind == "prerelease" and not prerelease:
                 return False
             return pattern_matches(self.tag_pattern, item.get("tag_name") or "")
+        if self.event_type == "pulls":
+            if item.get("_event") not in self.pr_event_set:
+                return False
+            if not self.include_bots and (item.get("user") or {}).get("type") == "Bot":
+                return False
+            # Drafts only count once they're marked ready (a "ready" event is never a draft).
+            if item.get("draft") and not self.include_drafts:
+                return False
+            base = (item.get("base") or {}).get("ref") or ""
+            return pattern_matches(self.branch, base)
         return True
 
     def describe(self) -> str:
@@ -167,6 +222,16 @@ class Route:
                 parts.append(f"tags `{self.tag_pattern}`")
         if self.event_type == "commits":
             parts.append(f"branch `{self.branch}`")
+        if self.event_type == "pulls":
+            events = self.pr_event_set
+            parts[0] += " (" + ("all events" if events == PR_EVENTS else
+                                ", ".join(PR_EVENT_LABELS[e] for e in events)) + ")"
+            if self.branch:
+                parts.append(f"into `{self.branch}`")
+            if self.include_drafts:
+                parts.append("incl. drafts")
+            if self.include_bots:
+                parts.append("incl. bots")
         if self.mention_role_id:
             parts.append(f"pings <@&{self.mention_role_id}>")
         if self.crosspost:

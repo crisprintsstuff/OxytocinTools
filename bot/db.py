@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS routes (
     mention_role_id INTEGER,
     crosspost       INTEGER NOT NULL DEFAULT 0,
     enabled         INTEGER NOT NULL DEFAULT 1,
+    pr_events       TEXT,
+    include_drafts  INTEGER NOT NULL DEFAULT 0,
+    include_bots    INTEGER NOT NULL DEFAULT 0,
     last_error      TEXT,
     created_by      INTEGER,
     created_at      TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -92,11 +95,27 @@ CREATE TABLE IF NOT EXISTS filings (
     UNIQUE (message_id, repo_id)
 );
 
+-- Last known state of each pull request, to notice when one is merged, closed, etc.
+CREATE TABLE IF NOT EXISTS pr_snapshots (
+    repo       TEXT    NOT NULL,             -- lower-case owner/name
+    number     INTEGER NOT NULL,
+    state      TEXT    NOT NULL,             -- open | closed | merged
+    draft      INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT,
+    PRIMARY KEY (repo, number)
+);
+
+-- When PR tracking started for a repo; PRs merged/closed/opened before it aren't announced.
+CREATE TABLE IF NOT EXISTS pr_baselines (
+    repo        TEXT PRIMARY KEY,
+    baseline_at REAL NOT NULL
+);
+
 -- Polling state is shared by every server tracking the same repo, so each
 -- GitHub feed is fetched once per cycle no matter how many servers use it.
 CREATE TABLE IF NOT EXISTS streams (
     repo         TEXT NOT NULL,      -- lower-case owner/name
-    stream       TEXT NOT NULL,      -- releases | issues | pulls | commits:<branch>
+    stream       TEXT NOT NULL,      -- releases | issues | prs | commits:<branch>
     etag         TEXT,
     last_checked TEXT,
     last_error   TEXT,
@@ -119,6 +138,11 @@ MIGRATIONS = {
         "issue_role_id": "INTEGER",
     },
     "repos": {"issue_access": "TEXT"},
+    "routes": {
+        "pr_events": "TEXT",
+        "include_drafts": "INTEGER NOT NULL DEFAULT 0",
+        "include_bots": "INTEGER NOT NULL DEFAULT 0",
+    },
 }
 
 _REPO_COLUMNS = "id, guild_id, owner, name, default_branch, issue_access"
@@ -126,7 +150,7 @@ _REPO_COLUMNS = "id, guild_id, owner, name, default_branch, issue_access"
 _ROUTE_SELECT = """
 SELECT r.id, r.repo_id, p.guild_id, p.owner, p.name, r.channel_id, r.event_type,
        r.release_kind, r.tag_pattern, r.branch, r.mention_role_id, r.crosspost,
-       r.enabled, r.last_error
+       r.enabled, r.last_error, r.pr_events, r.include_drafts, r.include_bots
 FROM routes r JOIN repos p ON p.id = r.repo_id
 """
 
@@ -146,12 +170,15 @@ def _dashboard(row: Iterable[Any]) -> Dashboard:
 
 def _route(row: Iterable[Any]) -> Route:
     (id_, repo_id, guild_id, owner, name, channel_id, event_type, release_kind,
-     tag_pattern, branch, mention_role_id, crosspost, enabled, last_error) = row
+     tag_pattern, branch, mention_role_id, crosspost, enabled, last_error,
+     pr_events, include_drafts, include_bots) = row
     return Route(
         id=id_, repo_id=repo_id, guild_id=guild_id, owner=owner, name=name,
         channel_id=channel_id, event_type=event_type, release_kind=release_kind,
         tag_pattern=tag_pattern, branch=branch, mention_role_id=mention_role_id,
         crosspost=bool(crosspost), enabled=bool(enabled), last_error=last_error,
+        pr_events=pr_events, include_drafts=bool(include_drafts),
+        include_bots=bool(include_bots),
     )
 
 
@@ -264,12 +291,16 @@ class Database:
     async def add_route(self, repo: Repo, channel_id: int, event_type: str, *,
                         release_kind: str = "all", tag_pattern: str | None = None,
                         branch: str | None = None, mention_role_id: int | None = None,
-                        crosspost: bool = False, created_by: int | None = None) -> Route:
+                        crosspost: bool = False, created_by: int | None = None,
+                        pr_events: str | None = None, include_drafts: bool = False,
+                        include_bots: bool = False) -> Route:
         cur = await self.conn.execute(
             "INSERT INTO routes (repo_id, channel_id, event_type, release_kind, tag_pattern, "
-            "branch, mention_role_id, crosspost, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "branch, mention_role_id, crosspost, created_by, pr_events, include_drafts, "
+            "include_bots) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (repo.id, channel_id, event_type, release_kind, tag_pattern, branch,
-             mention_role_id, int(crosspost), created_by),
+             mention_role_id, int(crosspost), created_by, pr_events, int(include_drafts),
+             int(include_bots)),
         )
         await self.conn.commit()
         route = await self.get_route(repo.guild_id, cur.lastrowid)
@@ -517,7 +548,45 @@ class Database:
         )
         await self.conn.commit()
 
+    # -------------------------------------------------------------- PR tracking
+    async def get_pr_baseline(self, repo: str) -> float | None:
+        async with self.conn.execute("SELECT baseline_at FROM pr_baselines WHERE repo = ?",
+                                     (repo,)) as cur:
+            row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def set_pr_baseline(self, repo: str, baseline_at: float) -> None:
+        await self.conn.execute(
+            "INSERT INTO pr_baselines (repo, baseline_at) VALUES (?, ?) "
+            "ON CONFLICT(repo) DO UPDATE SET baseline_at = excluded.baseline_at",
+            (repo, baseline_at))
+        await self.conn.commit()
+
+    async def get_pr_snapshots(self, repo: str) -> dict[int, tuple[str, bool]]:
+        """number -> (state, draft) for every PR seen in this repo."""
+        async with self.conn.execute(
+            "SELECT number, state, draft FROM pr_snapshots WHERE repo = ?", (repo,)
+        ) as cur:
+            return {n: (state, bool(draft)) for n, state, draft in await cur.fetchall()}
+
+    async def save_pr_snapshots(self, repo: str,
+                                rows: Iterable[tuple[int, str, bool, str | None]]) -> None:
+        await self.conn.executemany(
+            "INSERT INTO pr_snapshots (repo, number, state, draft, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(repo, number) DO UPDATE SET "
+            "state = excluded.state, draft = excluded.draft, updated_at = excluded.updated_at",
+            [(repo, n, state, int(draft), updated) for n, state, draft, updated in rows],
+        )
+        # Finished PRs that haven't changed in a long time are no longer needed.
+        await self.conn.execute(
+            "DELETE FROM pr_snapshots WHERE repo = ? AND state != 'open' "
+            "AND updated_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-180 days')", (repo,))
+        await self.conn.commit()
+
     async def delete_stream(self, repo: str, stream: str) -> None:
+        if stream == "prs":
+            await self.conn.execute("DELETE FROM pr_snapshots WHERE repo = ?", (repo,))
+            await self.conn.execute("DELETE FROM pr_baselines WHERE repo = ?", (repo,))
         await self.conn.execute("DELETE FROM streams WHERE repo = ? AND stream = ?", (repo, stream))
         await self.conn.execute("DELETE FROM seen_items WHERE repo = ? AND stream = ?", (repo, stream))
         await self.conn.commit()

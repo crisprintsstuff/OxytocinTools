@@ -11,6 +11,7 @@ ORANGE = discord.Color.from_rgb(210, 153, 34)
 PURPLE = discord.Color.from_rgb(130, 80, 223)
 BLUE = discord.Color.from_rgb(9, 105, 218)
 GREY = discord.Color.from_rgb(101, 109, 118)
+RED = discord.Color.from_rgb(207, 34, 46)
 
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
@@ -95,13 +96,28 @@ def issue_embed(repo: str, issue: dict[str, Any]) -> discord.Embed:
     return embed
 
 
+
+# event -> (title verb, color, timestamp field, show description)
+_PR_EVENT_STYLE = {
+    "opened": ("PR opened", GREEN, "created_at", True),
+    "ready": ("PR ready for review", GREEN, "updated_at", True),
+    "merged": ("PR merged", PURPLE, "merged_at", False),
+    "closed": ("PR closed", RED, "closed_at", False),
+    "reopened": ("PR reopened", GREEN, "updated_at", True),
+}
+
+
 def pull_embed(repo: str, pr: dict[str, Any]) -> discord.Embed:
+    event = pr.get("_event") or "opened"
+    verb, color, when, show_body = _PR_EVENT_STYLE.get(event, _PR_EVENT_STYLE["opened"])
+    if pr.get("draft") and event == "opened":
+        verb, color = "Draft PR opened", GREY
     embed = discord.Embed(
-        title=f"[{repo}] PR opened: #{pr['number']} {pr['title']}"[:256],
+        title=f"[{repo}] {verb}: #{pr['number']} {pr['title']}"[:256],
         url=pr.get("html_url"),
-        description=truncate(pr.get("body"), 800),
-        color=GREY if pr.get("draft") else PURPLE,
-        timestamp=_ts(pr.get("created_at")),
+        description=truncate(pr.get("body"), 800) if show_body else None,
+        color=color,
+        timestamp=_ts(pr.get(when) or pr.get("updated_at")),
     )
     _author(embed, pr.get("user"))
     base = (pr.get("base") or {}).get("ref")
@@ -121,6 +137,6 @@ def build_embeds(repo: str, stream: str, items: list[dict[str, Any]]) -> list[di
         return [release_embed(repo, i) for i in items]
     if stream == "issues":
         return [issue_embed(repo, i) for i in items]
-    if stream == "pulls":
+    if stream in ("prs", "pulls"):
         return [pull_embed(repo, i) for i in items]
     raise ValueError(stream)

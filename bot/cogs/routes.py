@@ -9,7 +9,8 @@ from discord.ext import commands
 from ..checks import UserError, bot_admin
 from ..embeds import truncate
 from ..github import GitHubError, NotFound
-from ..models import EVENT_LABELS, validate_pattern
+from ..models import EVENT_LABELS, PR_EVENTS, parse_pr_events, validate_pattern
+from ..poller import current_pr_event
 from . import missing_channel_perms, repo_autocomplete, resolve_tracked_repo, route_autocomplete
 
 if TYPE_CHECKING:
@@ -45,9 +46,13 @@ class Routes(commands.GroupCog, group_name="route",
         event="What to post",
         release_kind="Releases only: stable, pre-releases, or both",
         tag_pattern="Releases only: tag filter, e.g. v2.* (glob) or re:^v\\d+\\.\\d+\\.\\d+$ (regex)",
-        branch="Commits only: branch to watch (defaults to the repo's default branch)",
+        branch="Commits: branch to watch (default: the repo's default branch). "
+               "Pull requests: only PRs into this branch, e.g. main",
         mention="Role to ping with each post",
         publish="Auto-publish posts when the channel is an announcement channel",
+        pr_events="Pull requests only: which events to post (default: opened, ready)",
+        include_drafts="Pull requests only: also post about draft PRs (default: no)",
+        include_bots="Pull requests only: also post about PRs from bots like Dependabot (default: no)",
     )
     @app_commands.choices(event=EVENT_CHOICES, release_kind=KIND_CHOICES)
     @app_commands.autocomplete(repo=repo_autocomplete)
@@ -56,14 +61,31 @@ class Routes(commands.GroupCog, group_name="route",
                   event: app_commands.Choice[str],
                   release_kind: app_commands.Choice[str] | None = None,
                   tag_pattern: str | None = None, branch: str | None = None,
-                  mention: discord.Role | None = None, publish: bool = False) -> None:
+                  mention: discord.Role | None = None, publish: bool = False,
+                  pr_events: str | None = None, include_drafts: bool | None = None,
+                  include_bots: bool | None = None) -> None:
         tracked = await resolve_tracked_repo(interaction, repo)
         event_type = event.value
 
         if event_type != "releases" and (release_kind or tag_pattern):
             raise UserError("`release_kind` and `tag_pattern` only apply to release routes.")
-        if event_type != "commits" and branch:
-            raise UserError("`branch` only applies to commit routes.")
+        if event_type not in ("commits", "pulls") and branch:
+            raise UserError("`branch` only applies to commit and pull request routes.")
+        if event_type != "pulls" and (pr_events or include_drafts is not None
+                                      or include_bots is not None):
+            raise UserError("`pr_events`, `include_drafts` and `include_bots` only apply to "
+                            "pull request routes.")
+        if event_type == "pulls":
+            try:
+                events = parse_pr_events(pr_events)
+            except ValueError as exc:
+                raise UserError(str(exc)) from exc
+            pr_events = ",".join(events)
+            if branch:
+                try:
+                    validate_pattern(branch)
+                except ValueError as exc:
+                    raise UserError(str(exc)) from exc
         if tag_pattern:
             try:
                 validate_pattern(tag_pattern)
@@ -82,8 +104,10 @@ class Routes(commands.GroupCog, group_name="route",
 
         for existing in await self.bot.db.list_routes(tracked.guild_id, tracked.id):
             if (existing.channel_id, existing.event_type, existing.release_kind,
-                    existing.tag_pattern, existing.branch) == (
-                    channel.id, event_type, kind, tag_pattern, branch):
+                    existing.tag_pattern, existing.branch, existing.pr_events,
+                    existing.include_drafts, existing.include_bots) == (
+                    channel.id, event_type, kind, tag_pattern, branch, pr_events,
+                    bool(include_drafts), bool(include_bots)):
                 raise UserError(f"An identical route already exists (#{existing.id}).")
 
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -96,7 +120,8 @@ class Routes(commands.GroupCog, group_name="route",
         route = await self.bot.db.add_route(
             tracked, channel.id, event_type, release_kind=kind, tag_pattern=tag_pattern,
             branch=branch, mention_role_id=mention.id if mention else None,
-            crosspost=publish, created_by=interaction.user.id,
+            crosspost=publish, created_by=interaction.user.id, pr_events=pr_events,
+            include_drafts=bool(include_drafts), include_bots=bool(include_bots),
         )
         note = ""
         try:
@@ -113,6 +138,16 @@ class Routes(commands.GroupCog, group_name="route",
             f"({route.describe()}). Only events from now on will be posted.{note}",
             ephemeral=True,
         )
+
+    @add.autocomplete("pr_events")
+    async def _pr_events_autocomplete(self, interaction: discord.Interaction,
+                                      current: str) -> list[app_commands.Choice[str]]:
+        suggestions = ["opened, ready", "opened, ready, merged", "merged",
+                       "merged, closed", "all"] + list(PR_EVENTS)
+        if current.strip():
+            suggestions.insert(0, current.strip())
+        return [app_commands.Choice(name=v, value=v)
+                for v in dict.fromkeys(suggestions) if current.lower() in v.lower() or v == current.strip()][:25]
 
     @app_commands.command(name="remove", description="Delete a route")
     @app_commands.autocomplete(route_id=route_autocomplete)
@@ -184,7 +219,10 @@ class Routes(commands.GroupCog, group_name="route",
         route = await self._get(interaction, route_id)
         await interaction.response.defer(ephemeral=True, thinking=True)
         items, _ = await self.bot.github.fetch_stream(route.owner, route.name, route.stream)
-        match = next((i for i in items or [] if route.accepts(i)), None)
+        items = items or []
+        if route.event_type == "pulls":  # label each PR by its current state
+            items = [e for e in (current_pr_event(pr, route.pr_event_set) for pr in items) if e]
+        match = next((i for i in items if route.accepts(i)), None)
         if match is None:
             await interaction.followup.send("Nothing on GitHub matches this route yet.", ephemeral=True)
             return
