@@ -264,10 +264,24 @@ class PRCardManager:
         self._cache[key] = (new_etag, data)
         return data
 
+    # The cache is shared with PR dashboards. A poll cycle is: begin_cycle(), dashboards
+    # and cards fetch what they need, end_cycle() drops responses nobody asked for.
+    def begin_cycle(self) -> None:
+        self._used.clear()
+        self._no_checks.clear()
+
+    def end_cycle(self) -> None:
+        for key in [k for k in self._cache if k not in self._used]:
+            del self._cache[key]
+
     async def refresh_all(self) -> None:
+        """A whole cycle on its own (cards only)."""
+        self.begin_cycle()
+        await self.update_all()
+        self.end_cycle()
+
+    async def update_all(self) -> None:
         async with self._lock:
-            self._used.clear()
-            self._no_checks.clear()
             for tracker in await self.bot.db.list_pr_trackers():
                 try:
                     await self._sync(tracker)
@@ -275,9 +289,19 @@ class PRCardManager:
                     break
                 except Exception:
                     log.exception("Failed to update PR cards for tracker %s", tracker.id)
-            # Forget cached responses nothing asked for this cycle (e.g. finished PRs).
-            for key in [k for k in self._cache if k not in self._used]:
-                del self._cache[key]
+
+    async def fetch_status(self, owner: str, name: str,
+                           number: int) -> tuple[dict[str, Any], dict[str, Any]]:
+        """A PR's details and summarized status (checks, reviews, merge). Raises GitHubError."""
+        base = f"/repos/{owner}/{name}"
+        pr = await self._get(f"{base}/pulls/{number}")
+        checks = await self._checks(f"{owner}/{name}".lower(), base, (pr.get("head") or {}).get("sha"))
+        reviews = summarize_reviews(await self._get(f"{base}/pulls/{number}/reviews", {"per_page": 100}),
+                                    (pr.get("user") or {}).get("login"))
+        return pr, build_status(pr, checks, reviews)
+
+    async def list_pulls(self, owner: str, name: str, **params: Any) -> list[dict[str, Any]]:
+        return await self._get(f"/repos/{owner}/{name}/pulls", params)
 
     async def sync(self, tracker: PRTracker) -> None:
         async with self._lock:
@@ -334,18 +358,13 @@ class PRCardManager:
 
     async def _update(self, tracker: PRTracker, card: PRCard, number: int) -> str | None:
         """Bring one card up to date. Returns an error message to record, if any."""
-        base = f"/repos/{tracker.owner}/{tracker.name}"
         try:
-            pr = await self._get(f"{base}/pulls/{number}")
-            checks = await self._checks(tracker.full_name.lower(), base, (pr.get("head") or {}).get("sha"))
-            reviews = summarize_reviews(await self._get(f"{base}/pulls/{number}/reviews", {"per_page": 100}),
-                                        (pr.get("user") or {}).get("login"))
+            pr, status = await self.fetch_status(tracker.owner, tracker.name, number)
         except RateLimited:
             raise
         except GitHubError as exc:
             log.warning("PR %s#%s: %s", tracker.full_name, number, exc)
             return f"GitHub: {exc}"
-        status = build_status(pr, checks, reviews)
         old = json.loads(card.status_json) if card.status_json else None
         embed, digest = render_card(tracker.full_name, pr, status)
         lines = timeline(old, status)

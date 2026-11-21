@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS dashboards (
     last_hash   TEXT,
     last_change REAL,
     last_error  TEXT,
+    kind        TEXT NOT NULL DEFAULT 'issues',
     created_by  INTEGER,
     created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -166,6 +167,7 @@ MIGRATIONS = {
         "issue_role_id": "INTEGER",
     },
     "repos": {"issue_access": "TEXT"},
+    "dashboards": {"kind": "TEXT NOT NULL DEFAULT 'issues'"},
     "routes": {
         "pr_events": "TEXT",
         "include_drafts": "INTEGER NOT NULL DEFAULT 0",
@@ -185,7 +187,7 @@ FROM routes r JOIN repos p ON p.id = r.repo_id
 
 _DASHBOARD_SELECT = """
 SELECT d.id, d.repo_id, p.guild_id, p.owner, p.name, d.channel_id, d.message_id, d.label,
-       d.pinned, d.last_hash, d.last_change, d.last_error
+       d.pinned, d.last_hash, d.last_change, d.last_error, d.kind
 FROM dashboards d JOIN repos p ON p.id = d.repo_id
 """
 
@@ -375,11 +377,12 @@ class Database:
 
     # ---------------------------------------------------------------- dashboards
     async def add_dashboard(self, repo: Repo, channel_id: int, *, label: str | None,
-                            pinned: bool, created_by: int | None) -> Dashboard:
+                            pinned: bool, created_by: int | None,
+                            kind: str = "issues") -> Dashboard:
         cur = await self.conn.execute(
-            "INSERT INTO dashboards (repo_id, channel_id, label, pinned, created_by) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (repo.id, channel_id, label, int(pinned), created_by),
+            "INSERT INTO dashboards (repo_id, channel_id, label, pinned, created_by, kind) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (repo.id, channel_id, label, int(pinned), created_by, kind),
         )
         await self.conn.commit()
         dash = await self.get_dashboard(cur.lastrowid)

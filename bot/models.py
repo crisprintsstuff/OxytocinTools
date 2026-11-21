@@ -253,6 +253,7 @@ class Dashboard:
     last_hash: str | None = None
     last_change: float | None = None
     last_error: str | None = None
+    kind: str = "issues"  # issues | prs
 
     @property
     def full_name(self) -> str:
@@ -260,13 +261,20 @@ class Dashboard:
 
     @property
     def issues_url(self) -> str:
-        url = f"https://github.com/{self.full_name}/issues"
+        """The GitHub list this dashboard mirrors (issues or pull requests, with its label)."""
+        if self.kind == "prs":
+            url = f"https://github.com/{self.full_name}/pulls"
+            query = "is:pr is:open"
+        else:
+            url = f"https://github.com/{self.full_name}/issues"
+            query = "is:issue is:open"
         if self.label:
-            url += "?q=" + quote(f'is:issue is:open label:"{self.label}"')
+            url += "?q=" + quote(f'{query} label:"{self.label}"')
         return url
 
     def describe(self) -> str:
-        return self.full_name + (f" (label `{self.label}`)" if self.label else "")
+        text = self.full_name + (" pull requests" if self.kind == "prs" else " issues")
+        return text + (f" (label `{self.label}`)" if self.label else "")
 
 
 @dataclass

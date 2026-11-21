@@ -23,7 +23,7 @@ def _jump(dash: Dashboard) -> str:
 
 @app_commands.guild_only()
 class Dashboards(commands.GroupCog, group_name="dashboard",
-                 group_description="Live issue dashboards that stay up to date in a channel"):
+                 group_description="Live issue and pull request dashboards that stay up to date"):
     def __init__(self, bot: TrackerBot):
         self.bot = bot
         super().__init__()
@@ -40,30 +40,34 @@ class Dashboards(commands.GroupCog, group_name="dashboard",
                 choices.append(app_commands.Choice(name=label[:100], value=d.id))
         return choices[:25]
 
-    @app_commands.command(name="create", description="Post a live issue dashboard for a repository")
+    @app_commands.command(name="create", description="Post a live issue or pull request dashboard")
     @app_commands.describe(
         repo="A tracked repository",
         channel="Where to post the dashboard",
-        label="Only show issues with this GitHub label, e.g. bug",
+        label="Only show issues/PRs with this GitHub label, e.g. bug",
         pin="Pin the dashboard message (needs Manage Messages / Pin Messages)",
+        type="Issues (default) or pull requests",
     )
+    @app_commands.choices(type=[app_commands.Choice(name="Issues", value="issues"),
+                                app_commands.Choice(name="Pull requests", value="prs")])
     @app_commands.autocomplete(repo=repo_autocomplete)
     @bot_admin()
     async def create(self, interaction: discord.Interaction, repo: str,
                      channel: discord.TextChannel, label: str | None = None,
-                     pin: bool = False) -> None:
+                     pin: bool = False, type: app_commands.Choice[str] | None = None) -> None:
         tracked = await resolve_tracked_repo(interaction, repo)
         label = label.strip() if label else None
+        kind = type.value if type else "issues"
         if missing := missing_channel_perms(channel):
             raise UserError(f"I'm missing {', '.join(missing)} in {channel.mention}.")
         for d in await self.bot.db.list_dashboards(tracked.guild_id):
-            if (d.repo_id, d.channel_id, (d.label or "").lower()) == \
-                    (tracked.id, channel.id, (label or "").lower()):
+            if (d.repo_id, d.channel_id, (d.label or "").lower(), d.kind) == \
+                    (tracked.id, channel.id, (label or "").lower(), kind):
                 raise UserError(f"That dashboard already exists (#{d.id}): {_jump(d)}")
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         dash = await self.bot.db.add_dashboard(tracked, channel.id, label=label, pinned=pin,
-                                               created_by=interaction.user.id)
+                                               created_by=interaction.user.id, kind=kind)
         await self.bot.dashboards.refresh(dash, force=True)
         dash = await self.bot.db.get_dashboard(dash.id)
         assert dash is not None

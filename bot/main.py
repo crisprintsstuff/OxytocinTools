@@ -124,9 +124,13 @@ class TrackerBot(commands.Bot):
             log.info("Channel %s deleted; removed %d route(s)/dashboard(s)", channel.id, removed)
 
     async def after_poll(self) -> None:
-        await self.dashboards.refresh_all()
-        await self.watches.sync_threads()
-        await self.prcards.refresh_all()
+        self.prcards.begin_cycle()  # PR dashboards and PR cards share one response cache
+        try:
+            await self.dashboards.refresh_all()
+            await self.watches.sync_threads()
+            await self.prcards.update_all()
+        finally:
+            self.prcards.end_cycle()
 
     async def on_message(self, message: discord.Message) -> None:
         try:
