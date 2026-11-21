@@ -89,6 +89,93 @@ def render_dashboard(dash: Dashboard, open_items: list[dict[str, Any]],
     return embed, hashlib.sha256(basis.encode()).hexdigest()
 
 
+# ---------------------------------------------------------------- PR dashboard
+PR_SHOWN = 15
+PR_DETAILS = 25        # open PRs whose checks/reviews are looked up (newest first)
+WAITING_SHOWN = 5
+MERGED_SHOWN = 5
+PR_LEGEND = ("✅ checks pass · ❌ failing · ⏳ running · 👍 approved · 📝 changes requested · "
+             "👀 needs review · ⚠️ conflicts · ⚪ draft")
+
+
+def _pr_icons(status: dict[str, Any] | None) -> str:
+    if status is None:
+        return "➖"
+    if status["draft"]:
+        return "⚪"
+    checks = {"passing": "✅", "failing": "❌", "pending": "⏳"}.get(status["checks"]["state"], "➖")
+    decisions = set(status["reviews"].values())
+    if "CHANGES_REQUESTED" in decisions:
+        review = "📝"
+    elif "APPROVED" in decisions and not status["requested"]:
+        review = "👍"
+    else:
+        review = "👀"
+    return checks + review + (" ⚠️" if status.get("merge") == "dirty" else "")
+
+
+def _needs_review(status: dict[str, Any] | None) -> bool:
+    return status is not None and not status["draft"] and \
+        not {"APPROVED", "CHANGES_REQUESTED"} & set(status["reviews"].values())
+
+
+def render_pr_dashboard(dash: Dashboard, open_prs: list[dict[str, Any]],
+                        statuses: dict[int, dict[str, Any]], closed: list[dict[str, Any]], *,
+                        interval: int, now: float | None = None) -> tuple[discord.Embed, str]:
+    """Open PRs with status icons, those waiting longest for review, and recent merges."""
+    now = now or time.time()
+    more = "+" if len(open_prs) >= PAGE else ""
+    drafts = [p for p in open_prs if p.get("draft")]
+    ready = [p for p in open_prs if not p.get("draft")]
+    st = statuses.get
+    mergeable = [p for p in ready if (st(p["number"]) or {}).get("merge") == "clean"]
+    attention = [p for p in ready if (s := st(p["number"])) and (
+        s["checks"]["state"] == "failing" or s.get("merge") == "dirty"
+        or "CHANGES_REQUESTED" in s["reviews"].values())]
+
+    lines = [f"**{len(ready)}{more}** open · **{len(drafts)}** draft{'s' if len(drafts) != 1 else ''} · "
+             f"**{len(mergeable)}** ready to merge · **{len(attention)}** need attention", ""]
+    ordered = sorted(ready, key=lambda p: p["created_at"], reverse=True) + \
+        sorted(drafts, key=lambda p: p["created_at"], reverse=True)
+    for p in ordered[:PR_SHOWN]:
+        author = (p.get("user") or {}).get("login", "?")
+        lines.append(f"{_pr_icons(st(p['number']))} [#{p['number']}]({p['html_url']}) "
+                     f"{_title(p['title'], 55)} · {author} · <t:{_ts(p['created_at'])}:R>")
+    if len(ordered) > PR_SHOWN:
+        lines.append(f"[…and {len(ordered) - PR_SHOWN}{more} more on GitHub]({dash.issues_url})")
+    if not open_prs:
+        lines.append("🎉 No open pull requests!")
+
+    waiting = sorted((p for p in ready if _needs_review(st(p["number"]))), key=lambda p: p["created_at"])
+    waiting_text = "\n".join(f"[#{p['number']}]({p['html_url']}) {_title(p['title'], 50)} · "
+                             f"opened <t:{_ts(p['created_at'])}:R>" for p in waiting[:WAITING_SHOWN])
+
+    cutoff = now - CLOSED_DAYS * 86400
+    merged = sorted((p for p in closed if p.get("merged_at") and _ts(p["merged_at"]) >= cutoff),
+                    key=lambda p: p["merged_at"], reverse=True)
+    merged_text = "\n".join(f"[#{p['number']}]({p['html_url']}) {_title(p['title'], 50)} · "
+                            f"<t:{_ts(p['merged_at'])}:R>" for p in merged[:MERGED_SHOWN])
+    if len(merged) > MERGED_SHOWN:
+        merged_text += f"\n…and {len(merged) - MERGED_SHOWN} more"
+
+    title = f"🔀 {dash.full_name} pull requests" + (f" · {dash.label}" if dash.label else "")
+    embed = discord.Embed(title=truncate(title, 256), url=dash.issues_url,
+                          description=truncate("\n".join(lines), 4000), color=COLOR)
+    embed.add_field(name="⏰ Waiting longest for review", value=truncate(waiting_text, 1024) or "Nothing waiting",
+                    inline=False)
+    embed.add_field(name=f"🟣 Merged in the last {CLOSED_DAYS} days ({len(merged)})",
+                    value=truncate(merged_text, 1024) or "None", inline=False)
+    minutes = max(1, interval // 60)
+    embed.set_footer(text=f"{PR_LEGEND}\nUpdates automatically every {minutes} min · Last change")
+    basis = "\n".join([embed.title or "", embed.description or "", waiting_text, merged_text,
+                       str(interval)])
+    return embed, hashlib.sha256(basis.encode()).hexdigest()
+
+
+def _has_label(pr: dict[str, Any], label: str | None) -> bool:
+    return not label or any(lbl.get("name", "").lower() == label.lower() for lbl in pr.get("labels", []))
+
+
 # --------------------------------------------------------------------- buttons
 async def _run(interaction: discord.Interaction, coro) -> None:
     try:
@@ -132,7 +219,8 @@ class RefreshButton(discord.ui.DynamicItem[discord.ui.Button], template=r"dash:r
 
 def dashboard_view(dash: Dashboard) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
-    view.add_item(ReportButton(dash.id, dash.label))
+    if dash.kind != "prs":
+        view.add_item(ReportButton(dash.id, dash.label))
     view.add_item(RefreshButton(dash.id))
     view.add_item(discord.ui.Button(label="View on GitHub", url=dash.issues_url))
     return view
@@ -166,6 +254,29 @@ class DashboardManager:
             "since": since, **label})
         return open_items, closed
 
+    async def render_prs(self, dash: Dashboard) -> tuple[discord.Embed, str]:
+        """Fetch a PR dashboard's data (via the PR cards' shared cache) and render it."""
+        cards = self.bot.prcards
+        open_prs = [p for p in await cards.list_pulls(dash.owner, dash.name, state="open", per_page=PAGE)
+                    if _has_label(p, dash.label)]
+        closed = [p for p in await cards.list_pulls(dash.owner, dash.name, state="closed", sort="updated",
+                                                    direction="desc", per_page=30)
+                  if _has_label(p, dash.label)]
+        statuses: dict[int, dict[str, Any]] = {}
+        newest = sorted((p for p in open_prs if not p.get("draft")), key=lambda p: p["created_at"],
+                        reverse=True)[:PR_DETAILS]
+        for p in newest:
+            try:
+                _, statuses[p["number"]] = await cards.fetch_status(dash.owner, dash.name, p["number"])
+            except GitHubError as exc:
+                if exc.status in (403, 429) or "rate limit" in str(exc).lower():
+                    raise
+                log.warning("Dashboard %s: PR #%s: %s", dash.id, p["number"], exc)
+        for p in open_prs:  # drafts only need their draft flag
+            if p.get("draft"):
+                statuses.setdefault(p["number"], {"draft": True})
+        return render_pr_dashboard(dash, open_prs, statuses, closed, interval=self.bot.poller.interval)
+
     async def refresh_all(self) -> None:
         for dash in await self.bot.db.list_dashboards():
             try:
@@ -187,12 +298,15 @@ class DashboardManager:
         async with self._lock:
             db = self.bot.db
             try:
-                open_items, closed = await self.snapshot(dash)
+                if dash.kind == "prs":
+                    embed, digest = await self.render_prs(dash)
+                else:
+                    open_items, closed = await self.snapshot(dash)
+                    embed, digest = render_dashboard(dash, open_items, closed,
+                                                     interval=self.bot.poller.interval)
             except GitHubError as exc:
                 await db.set_dashboard_error(dash.id, f"GitHub: {exc}")
                 return
-            embed, digest = render_dashboard(dash, open_items, closed,
-                                             interval=self.bot.poller.interval)
             changed = digest != dash.last_hash
             last_change = time.time() if changed or dash.last_change is None else dash.last_change
             embed.timestamp = datetime.fromtimestamp(last_change, tz=timezone.utc)
@@ -221,7 +335,7 @@ class DashboardManager:
                     await db.set_dashboard_message(dash.id, msg.id)
                     if dash.pinned:
                         try:
-                            await msg.pin(reason="Issue dashboard")
+                            await msg.pin(reason="Dashboard")
                         except discord.HTTPException as exc:
                             log.warning("Couldn't pin dashboard %s: %s", dash.id, exc)
             except discord.HTTPException as exc:

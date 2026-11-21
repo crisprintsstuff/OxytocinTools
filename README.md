@@ -9,7 +9,7 @@ pre-releases to `#beta-testers`, `v2.*` tags to `#v2`, and so on.
 - Slash commands, with autocomplete for tracked repos and routes
 - Per-route filters: stable vs. pre-release, tag pattern (glob or regex), and branch for commits
 - Optional role ping per route, and auto-publish in announcement channels
-- Live issue dashboards: one message per repo that stays up to date, with a Report button
+- Live issue and pull request dashboards: one message per repo that stays up to date
 - **Watches:** mention a role like `@bug-report`, or post in a forum channel, and the bot files the GitHub issue for you
 - Create issues with `/issue create` or by right-clicking a message, with configurable access and a cooldown
 - Admin permissions: **Manage Server**, a configurable bot admin role, or owner IDs
@@ -281,17 +281,17 @@ When a PR is merged or closed, its card is updated one last time and its thread 
   Without them, the card says so and shows everything else. If you add them later, approve the
   change under **Settings → Applications → Installed GitHub Apps → Configure**.
 
-### Issue dashboards — `/dashboard`
+### Dashboards — `/dashboard`
 A dashboard is one message in a channel that the bot keeps editing, so it always shows a
-repo's current issues. The channel doesn't fill up with new posts.
+repo's current issues or pull requests. The channel doesn't fill up with new posts.
 
 | Command | Description |
 |---|---|
-| 🔒 `/dashboard create <repo> <channel> [label] [pin]` | Post a dashboard. `label` shows only issues with that GitHub label (e.g. a "bug" dashboard). `pin` pins it. |
+| 🔒 `/dashboard create <repo> <channel> [label] [pin] [type]` | Post a dashboard. `type` is **Issues** (the default) or **Pull requests**. `label` shows only issues or PRs with that GitHub label (e.g. a "bug" dashboard). `pin` pins it. |
 | 🔒 `/dashboard list` | Show dashboards, with links and any errors. |
 | 🔒 `/dashboard remove <dashboard> [delete_message]` | Delete a dashboard and, by default, its message. |
 
-Each dashboard shows:
+**Issue dashboards** show:
 - Open issue and pull request counts
 - The 15 newest open issues, with labels and age
 - Issues closed in the last 7 days
@@ -322,6 +322,18 @@ something actually changed, and unchanged GitHub data doesn't use up your rate l
 - **Untracking the repo** or deleting the channel removes its dashboards.
 - **Pinning** needs the **Manage Messages** (or **Pin Messages**) permission in that channel.
 - **Counts** read the newest 100 open items; above that they show as `100+`.
+
+**Pull request dashboards** (`type:Pull requests`) show:
+- Counts: open, drafts, ready to merge, and needing attention (failing checks, conflicts or
+  changes requested)
+- The 15 newest open PRs (drafts last), each with status icons: ✅ checks pass · ❌ failing ·
+  ⏳ running · 👍 approved · 📝 changes requested · 👀 needs review · ⚠️ conflicts · ⚪ draft
+- **Waiting longest for review:** open PRs with no approval or requested changes yet, oldest first
+- PRs merged in the last 7 days
+
+They have **Refresh** and **View on GitHub** buttons (no Report button). They share GitHub
+data with PR cards (`/pr track`), so using both costs hardly any extra requests. CI icons need
+the GitHub App's **Checks** and **Commit statuses** permissions.
 
 ### Administration — `/admin`
 | Command | Description |
@@ -358,8 +370,9 @@ something actually changed, and unchanged GitHub data doesn't use up your rate l
 ## Example: following pull requests
 
 ```
-/pr track   repo:crisprintsstuff/OxyBrush  channel:#pull-requests  branch:main  mention:@reviewers
-/route add  repo:crisprintsstuff/OxyBrush  channel:#changelog  event:Pull requests  pr_events:merged
+/pr track          repo:crisprintsstuff/OxyBrush  channel:#pull-requests  branch:main  mention:@reviewers
+/dashboard create  repo:crisprintsstuff/OxyBrush  channel:#pull-requests  type:Pull requests  pin:True
+/route add         repo:crisprintsstuff/OxyBrush  channel:#changelog  event:Pull requests  pr_events:merged
 ```
 
 ## Example: a bug dashboard
@@ -421,7 +434,7 @@ bot/
   models.py    Repo/Route models, filters, repo parsing
   embeds.py    Discord embed formatting
   checks.py    admin permission check
-  dashboards.py  live issue dashboards: rendering, refreshing, buttons
+  dashboards.py  live issue and PR dashboards: rendering, refreshing, buttons
   watches.py   role-mention and forum watches that file issues, and closing forum posts
   prcards.py   live PR cards: check and review summaries, the timeline, keeping cards updated
   cogs/        slash commands: repos.py, routes.py, issues.py, dashboards.py, watches.py, prs.py, admin.py
