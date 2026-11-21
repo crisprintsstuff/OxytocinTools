@@ -5,7 +5,7 @@ import logging
 import time
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Iterable
 
 from .db import Database
 from .github import GitHubClient, GitHubError, NotFound, RateLimited, item_id
@@ -17,6 +17,62 @@ log = logging.getLogger(__name__)
 MAX_ITEMS_PER_CYCLE = 10
 
 Sender = Callable[[Route, str, list[dict[str, Any]]], Awaitable[None]]
+
+
+def _epoch(value: str | None) -> float | None:
+    if not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+
+def pr_status(pr: dict[str, Any]) -> str:
+    """open | closed | merged"""
+    return "merged" if pr.get("merged_at") else (pr.get("state") or "open")
+
+
+def detect_pr_events(prs: list[dict[str, Any]], snapshots: dict[int, tuple[str, bool]],
+                     baseline: float) -> list[dict[str, Any]]:
+    """Compare PRs with their last known (state, draft) and return lifecycle events.
+
+    Each event is a copy of the PR with ``_event`` set to opened, ready, merged, closed or
+    reopened, oldest change first. PRs not seen before are judged by their timestamps, so
+    a PR merged long before tracking started isn't announced when someone comments on it.
+    """
+    events: list[dict[str, Any]] = []
+    for pr in sorted(prs, key=lambda p: p.get("updated_at") or ""):
+        new = pr_status(pr)
+        old = snapshots.get(pr["number"])
+
+        def add(kind: str) -> None:
+            events.append({**pr, "_event": kind})
+
+        if old is None:
+            if (_epoch(pr.get("created_at")) or 0) > baseline:
+                add("opened")
+            if new == "merged" and (_epoch(pr.get("merged_at")) or 0) > baseline:
+                add("merged")
+            elif new == "closed" and (_epoch(pr.get("closed_at")) or 0) > baseline:
+                add("closed")
+            continue
+        old_state, old_draft = old
+        if old_state == "open" and new in ("merged", "closed"):
+            add(new)
+        elif old_state != "open" and new == "open":
+            add("reopened")
+        if new == "open" and old_draft and not pr.get("draft"):
+            add("ready")
+    return events
+
+
+def current_pr_event(pr: dict[str, Any], wanted: Iterable[str]) -> dict[str, Any] | None:
+    """Label a PR with the event that best describes its current state (for /route test)."""
+    candidates = {"merged": ["merged"], "closed": ["closed"],
+                  "open": ["opened", "ready", "reopened"]}[pr_status(pr)]
+    if pr_status(pr) == "open" and pr.get("draft"):
+        candidates = ["opened"]
+    wanted = list(wanted)
+    kind = next((c for c in candidates if c in wanted), None)
+    return {**pr, "_event": kind} if kind else None
 
 
 class Poller:
@@ -140,6 +196,9 @@ class Poller:
         return age < self.release_notes_wait
 
     async def _poll_stream(self, repo_key: str, stream: str, routes: list[Route]) -> None:
+        if stream == "prs":
+            await self._poll_prs(repo_key, routes)
+            return
         owner, name = repo_key.split("/", 1)
         if routes:
             owner, name = routes[0].owner, routes[0].name
@@ -195,5 +254,53 @@ class Poller:
                 continue
             try:
                 await self.sender(route, stream, matching)
+            except Exception:
+                log.exception("Failed to deliver to route %s", route.id)
+
+    async def _poll_prs(self, repo_key: str, routes: list[Route]) -> None:
+        """Pull requests: compare each recently updated PR with its last known state."""
+        owner, name = repo_key.split("/", 1)
+        if routes:
+            owner, name = routes[0].owner, routes[0].name
+        state = await self.db.get_stream(repo_key, "prs")
+        baseline = await self.db.get_pr_baseline(repo_key)
+        fresh = state is None or baseline is None
+        try:
+            items, etag = await self.github.fetch_stream(
+                owner, name, "prs", None if fresh else state["etag"])  # type: ignore[index]
+        except GitHubError as exc:
+            if state is not None and not isinstance(exc, RateLimited):
+                await self.db.set_stream_error(repo_key, "prs", str(exc))
+            if isinstance(exc, NotFound) and state is not None:
+                log.warning("%s prs: %s", repo_key, exc)
+                return
+            raise
+
+        if items is None:  # 304 Not Modified
+            await self.db.save_stream(repo_key, "prs", etag=etag)
+            return
+        rows = [(pr["number"], pr_status(pr), bool(pr.get("draft")), pr.get("updated_at"))
+                for pr in items]
+        if fresh:
+            await self.db.set_pr_baseline(repo_key, time.time())
+            await self.db.save_pr_snapshots(repo_key, rows)
+            await self.db.save_stream(repo_key, "prs", etag=etag)
+            log.info("Baselined %s pull requests (%d)", repo_key, len(rows))
+            return
+
+        events = detect_pr_events(items, await self.db.get_pr_snapshots(repo_key),
+                                  baseline)  # type: ignore[arg-type]
+        await self.db.save_pr_snapshots(repo_key, rows)
+        await self.db.save_stream(repo_key, "prs", etag=etag)
+        if not events:
+            return
+        events = events[-MAX_ITEMS_PER_CYCLE:]
+        log.info("%s: %d pull request event(s)", repo_key, len(events))
+        for route in routes:
+            matching = [e for e in events if route.accepts(e)]
+            if not matching:
+                continue
+            try:
+                await self.sender(route, "prs", matching)
             except Exception:
                 log.exception("Failed to deliver to route %s", route.id)

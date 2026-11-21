@@ -146,17 +146,37 @@ A repo can have any number of routes.
 
 | Command | Description |
 |---|---|
-| 🔒 `/route add <repo> <channel> <event> [release_kind] [tag_pattern] [branch] [mention] [publish]` | Create a route. |
+| 🔒 `/route add <repo> <channel> <event> [release_kind] [tag_pattern] [branch] [mention] [publish] [pr_events] [include_drafts] [include_bots]` | Create a route. |
 | 🔒 `/route list [repo]` | Show routes, including paused ones and their errors. |
 | 🔒 `/route toggle <route>` | Pause or resume a route. |
 | 🔒 `/route remove <route>` | Delete a route. |
 | 🔒 `/route test <route>` | Post the most recent matching item, to check formatting and permissions. |
 
-**Events:** `Releases`, `Commits` (per branch), `New issues`, `New pull requests`.
+**Events:** `Releases`, `Commits` (per branch), `New issues`, `Pull requests`.
 
 **Release filters**
 - `release_kind`: `All releases` / `Stable releases only` / `Pre-releases only`
 - `tag_pattern`: a glob like `v2.*`, or a regex prefixed with `re:`, e.g. `re:^v\d+\.\d+\.\d+$`
+
+**Pull request options**
+- `pr_events`: which changes to post, comma-separated. The default is `opened, ready`.
+
+  | Event | Posted when |
+  |---|---|
+  | `opened` | A PR is opened |
+  | `ready` | A draft PR is marked ready for review |
+  | `merged` | A PR is merged |
+  | `closed` | A PR is closed without merging |
+  | `reopened` | A closed PR is reopened |
+
+  `all` means all five. For example, `pr_events:merged` makes a "what just landed" channel.
+- `branch`: only PRs into this branch, e.g. `main`. Globs like `release/*` work.
+- `include_drafts`: also post about draft PRs. Off by default: a draft is posted once it's
+  marked ready (with the `ready` event).
+- `include_bots`: also post about PRs opened by bots such as Dependabot. Off by default.
+
+The bot checks the PRs updated since its last look, so a PR that's opened and merged between
+two checks gets both posts, and PRs merged before a route existed are never announced.
 
 ### Issues — `/issue` and the message menu
 | Command | Description |
@@ -288,6 +308,8 @@ something actually changed, and unchanged GitHub data doesn't use up your rate l
 /route add   repo:my-org/app  channel:#legacy         event:Releases  tag_pattern:v1.*
 /route add   repo:my-org/app  channel:#dev-feed       event:Commits   branch:develop
 /route add   repo:my-org/app  channel:#triage         event:New issues
+/route add   repo:my-org/app  channel:#reviews        event:Pull requests  branch:main
+/route add   repo:my-org/app  channel:#changelog      event:Pull requests  pr_events:merged  branch:main
 ```
 
 ## Example: letting testers report bugs

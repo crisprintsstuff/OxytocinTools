@@ -394,9 +394,10 @@ class GitHubClient:
         elif stream == "issues":
             path = f"{base}/issues"
             params = {"state": "all", "sort": "created", "direction": "desc", "per_page": PER_PAGE}
-        elif stream == "pulls":
+        elif stream == "prs":
+            # Most recently *updated* first, so merges, closes and drafts marked ready show up.
             path = f"{base}/pulls"
-            params = {"state": "all", "sort": "created", "direction": "desc", "per_page": PER_PAGE}
+            params = {"state": "all", "sort": "updated", "direction": "desc", "per_page": PER_PAGE}
         elif stream.startswith("commits:"):
             path = f"{base}/commits"
             params = {"sha": stream.split(":", 1)[1], "per_page": PER_PAGE}
