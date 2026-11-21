@@ -30,13 +30,14 @@ pre-releases to `#beta-testers`, `v2.*` tags to `#v2`, and so on.
 3. Invite the bot. Replace `CLIENT_ID` with the application ID:
 
    ```
-   https://discord.com/oauth2/authorize?client_id=CLIENT_ID&scope=bot+applications.commands&permissions=292058000448
+   https://discord.com/oauth2/authorize?client_id=CLIENT_ID&scope=bot+applications.commands&permissions=326417738816
    ```
 
    That grants View Channels, Send Messages, Embed Links, Add Reactions, Read Message History,
-   Mention All Roles, Manage Messages (pinning dashboards), and Send Messages in Threads and
-   Manage Threads (replying in and closing forum posts). Already invited the bot with fewer
-   permissions? Open this link again and authorize it to update them.
+   Mention All Roles, Manage Messages (pinning dashboards), Create Public Threads (PR card
+   threads), and Send Messages in Threads and Manage Threads (replying in and closing threads).
+   Already invited the bot with fewer permissions? Open this link again and authorize it to
+   update them.
 
 ### 2. Create a GitHub App (recommended)
 
@@ -58,6 +59,8 @@ later. No per-repo invites are needed. Issues it creates show as opened by
      | Contents | Read-only (or **Read and write** to permanently re-host Discord attachments) |
      | Issues | **Read and write** (Read-only if you don't want issue creation) |
      | Pull requests | Read-only |
+     | Checks | Read-only (CI results on PR cards) |
+     | Commit statuses | Read-only (CI results on PR cards) |
      | Metadata | Read-only (selected automatically) |
    - **Where can this GitHub App be installed?** **Only on this account**.
 3. Click **Create GitHub App**. On the next page:
@@ -247,6 +250,37 @@ they work as triggers and notify nobody.
   named **Solved** (or Resolved, Fixed, Done), that tag is added too. This needs **Manage Threads**.
 - Forum posts skip the per-user cooldown; use the forum's slowmode if you need one.
 
+### PR cards — `/pr`
+One live card per open pull request, kept up to date, with a thread logging every change.
+
+| Command | Description |
+|---|---|
+| 🔒 `/pr track <repo> <channel> [branch] [include_drafts] [include_bots] [threads] [mention]` | Post a card for each open PR in `channel`, and one for each new PR as it opens. |
+| 🔒 `/pr list` | Show trackers, how many open PRs each has, and any errors. |
+| 🔒 `/pr stop <tracker>` | Stop updating the cards. The cards stay where they are. |
+
+Each card shows:
+- **State:** 🟢 open, ⚪ draft, 🟣 merged, 🔴 closed (with the matching color)
+- The author, branches, and when it was opened, merged or closed
+- **Checks:** passed, failed (with the failing checks' names) and still running
+- **Reviews:** approvals, changes requested, and who it's waiting on
+- **Merge:** ready to merge, has conflicts, behind the base branch, or blocked by branch rules
+- Lines added and removed, files changed and commits, plus **Open PR**, **Checks** and **Files** buttons
+
+With `threads` on (the default), the bot opens a thread under each card and posts a line for each
+change: ready for review, new commits pushed, checks failed or all passed, approved, changes
+requested, review requested, merge conflicts found or resolved, merged, closed or reopened.
+When a PR is merged or closed, its card is updated one last time and its thread is archived.
+
+- Filters work like PR routes: `branch` (glob), and `include_drafts` / `include_bots` (off by
+  default; a draft gets its card once it's marked ready).
+- Cards update on every GitHub check (`POLL_INTERVAL`), and are only edited when something changed.
+  Unchanged GitHub data doesn't count against the rate limit (ETags).
+- If someone deletes a card, it's posted again on the next change (without pinging again).
+- CI results need the GitHub App's **Checks** and **Commit statuses** permissions (read-only).
+  Without them, the card says so and shows everything else. If you add them later, approve the
+  change under **Settings → Applications → Installed GitHub Apps → Configure**.
+
 ### Issue dashboards — `/dashboard`
 A dashboard is one message in a channel that the bot keeps editing, so it always shows a
 repo's current issues. The channel doesn't fill up with new posts.
@@ -321,6 +355,13 @@ something actually changed, and unchanged GitHub data doesn't use up your rate l
 /admin issue-access  level:Nobody (disabled)  repo:my-org/internal
 ```
 
+## Example: following pull requests
+
+```
+/pr track   repo:crisprintsstuff/OxyBrush  channel:#pull-requests  branch:main  mention:@reviewers
+/route add  repo:crisprintsstuff/OxyBrush  channel:#changelog  event:Pull requests  pr_events:merged
+```
+
 ## Example: a bug dashboard
 
 ```
@@ -382,6 +423,7 @@ bot/
   checks.py    admin permission check
   dashboards.py  live issue dashboards: rendering, refreshing, buttons
   watches.py   role-mention and forum watches that file issues, and closing forum posts
-  cogs/        slash commands: repos.py, routes.py, issues.py, dashboards.py, watches.py, admin.py
+  prcards.py   live PR cards: check and review summaries, the timeline, keeping cards updated
+  cogs/        slash commands: repos.py, routes.py, issues.py, dashboards.py, watches.py, prs.py, admin.py
 tests/
 ```
