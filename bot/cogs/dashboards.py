@@ -85,7 +85,7 @@ class Dashboards(commands.GroupCog, group_name="dashboard",
             f"take it down.{note}",
             ephemeral=True)
 
-    @app_commands.command(name="list", description="List issue dashboards")
+    @app_commands.command(name="list", description="List dashboards")
     @bot_admin()
     async def list_(self, interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
@@ -99,11 +99,11 @@ class Dashboards(commands.GroupCog, group_name="dashboard",
             lines.append(f"`#{d.id}` **{d.describe()}** in <#{d.channel_id}> · {_jump(d)}")
             if d.last_error:
                 lines.append(f"  ⚠️ {truncate(d.last_error, 150)}")
-        embed = discord.Embed(title="Issue dashboards", description=truncate("\n".join(lines), 4000),
+        embed = discord.Embed(title="Dashboards", description=truncate("\n".join(lines), 4000),
                               color=discord.Color.blurple())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="remove", description="Delete an issue dashboard")
+    @app_commands.command(name="remove", description="Delete a dashboard")
     @app_commands.describe(dashboard="The dashboard to remove",
                            delete_message="Also delete the dashboard message (default: yes)")
     @app_commands.autocomplete(dashboard=_dashboard_autocomplete)

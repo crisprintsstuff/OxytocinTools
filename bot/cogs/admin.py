@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -97,12 +99,17 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
         bot, poller, gh = self.bot, self.bot.poller, self.bot.github
         repos = await bot.db.list_repos(interaction.guild.id)
         routes = await bot.db.list_routes(interaction.guild.id)
+        dashboards = await bot.db.list_dashboards(interaction.guild.id)
+        watches = await bot.db.list_watches(interaction.guild.id)
+        trackers = await bot.db.list_pr_trackers(interaction.guild.id)
         role_id = await bot.db.get_admin_role(interaction.guild.id)
 
         embed = discord.Embed(title="Tracker status", color=discord.Color.blurple())
         embed.add_field(name="This server",
                         value=f"{len(repos)} repo(s)\n{sum(r.enabled for r in routes)} active / "
-                              f"{len(routes)} route(s)\nAdmin role: "
+                              f"{len(routes)} route(s)\n"
+                              f"{len(dashboards)} dashboard(s) · {len(watches)} watch(es) · "
+                              f"{len(trackers)} PR tracker(s)\nAdmin role: "
                               f"{f'<@&{role_id}>' if role_id else 'none'}")
         last = discord.utils.format_dt(_dt(poller.last_run), "R") \
             if poller.last_run else "not yet"
@@ -149,9 +156,12 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
                 state = await bot.db.get_stream(r.repo_key, r.stream)
                 if r.enabled and state and state["last_error"]:
                     problems.append(f"Route `#{r.id}` ({r.full_name} {r.stream}): {state['last_error']}")
-        for d in await bot.db.list_dashboards(interaction.guild.id):
+        for d in dashboards:
             if d.last_error:
                 problems.append(f"Dashboard `#{d.id}` ({d.full_name}): {d.last_error}")
+        for t in trackers:
+            if t.last_error:
+                problems.append(f"PR tracker `#{t.id}` ({t.full_name}): {t.last_error}")
         if problems:
             embed.add_field(name="⚠️ Problems", value="\n".join(problems)[:1024], inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True,
@@ -162,6 +172,58 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
     async def check_now(self, interaction: discord.Interaction) -> None:
         self.bot.poller.trigger()
         await interaction.response.send_message("🔄 Checking GitHub now.", ephemeral=True)
+
+    @app_commands.command(name="export", description="Export this server's bot configuration as JSON")
+    @bot_admin()
+    async def export_(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        data = await self.bot.db.export_config(interaction.guild.id)
+        raw = json.dumps(data, indent=2).encode("utf-8")
+        guild_entry = data["guilds"].get(str(interaction.guild.id), {})
+        repos = guild_entry.get("repos", [])
+        routes = sum(len(r.get("routes", [])) for r in repos)
+        dashes = sum(len(r.get("dashboards", [])) for r in repos)
+        watches = sum(len(r.get("watches", [])) for r in repos)
+        trackers = sum(len(r.get("pr_trackers", [])) for r in repos)
+        file = discord.File(io.BytesIO(raw), filename=f"oxytocintools-{interaction.guild.id}.json")
+        await interaction.response.send_message(
+            f"📦 Exported **{len(repos)}** repo(s), **{routes}** route(s), "
+            f"**{dashes}** dashboard(s), **{watches}** watch(es), and "
+            f"**{trackers}** PR tracker(s).",
+            file=file,
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="import",
+                          description="Restore this server's bot configuration from a JSON export")
+    @app_commands.describe(file="JSON file previously created by /admin export")
+    @bot_admin()
+    async def import_(self, interaction: discord.Interaction, file: discord.Attachment) -> None:
+        assert interaction.guild is not None
+        if file.size > 1_000_000:
+            raise UserError("Backup file is too large (max 1 MB).")
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        raw = await file.read()
+        try:
+            data = json.loads(raw.decode("utf-8"))
+            counts = await self.bot.db.import_config(data, guild_id=interaction.guild.id)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise UserError(f"Couldn't import configuration: {exc}") from exc
+        if hasattr(self.bot, "poller"):
+            self.bot.poller.trigger()
+        await interaction.followup.send(
+            f"✅ Imported **{counts['repos']}** repo(s), **{counts['routes']}** route(s), "
+            f"**{counts['dashboards']}** dashboard(s), **{counts['watches']}** watch(es), "
+            f"and **{counts['pr_trackers']}** PR tracker(s) (existing entries skipped).",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="sync", description="Force-sync global slash commands with Discord")
+    @bot_admin()
+    async def sync(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        count = await self.bot.sync_commands(force=True)
+        await interaction.followup.send(f"✅ Synced {count} global slash command(s).", ephemeral=True)
 
 
 async def setup(bot: TrackerBot) -> None:

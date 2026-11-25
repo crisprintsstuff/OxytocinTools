@@ -115,6 +115,82 @@ class PullRequests(commands.GroupCog, group_name="pr",
         await interaction.response.send_message(embed=embed, ephemeral=True,
                                                 allowed_mentions=discord.AllowedMentions.none())
 
+    @app_commands.command(name="edit", description="Edit an existing PR card tracker")
+    @app_commands.describe(
+        tracker="The PR card tracker to edit",
+        channel="New channel for PR cards",
+        branch="Only PRs into this branch (glob or re:...)",
+        clear_branch="Watch PRs into any branch",
+        include_drafts="Also make cards for draft PRs",
+        include_bots="Also make cards for PRs from bots",
+        threads="Open a timeline thread under each card",
+        mention="Role to ping when a new card is posted",
+        clear_mention="Remove the mention role",
+    )
+    @app_commands.autocomplete(tracker=_tracker_autocomplete)
+    @bot_admin()
+    async def edit(self, interaction: discord.Interaction, tracker: int,
+                   channel: discord.TextChannel | None = None,
+                   branch: str | None = None, clear_branch: bool = False,
+                   include_drafts: bool | None = None, include_bots: bool | None = None,
+                   threads: bool | None = None, mention: discord.Role | None = None,
+                   clear_mention: bool = False) -> None:
+        assert interaction.guild is not None
+        found = await self.bot.db.get_pr_tracker(tracker, interaction.guild.id)
+        if found is None:
+            raise UserError(f"PR card tracker #{tracker} doesn't exist. See `/pr list`.")
+        if clear_branch and branch is not None:
+            raise UserError("Choose either `branch` or `clear_branch`, not both.")
+        if clear_mention and mention is not None:
+            raise UserError("Choose either `mention` or `clear_mention`, not both.")
+        if mention and mention.is_default():
+            raise UserError("Pinging @everyone isn't supported; pick a role.")
+
+        new_branch = None if clear_branch else (
+            (branch.strip() or None) if branch is not None else found.branch
+        )
+        if new_branch:
+            try:
+                validate_pattern(new_branch)
+            except ValueError as exc:
+                raise UserError(str(exc)) from exc
+
+        new_threads = found.threads if threads is None else threads
+        new_channel_id = channel.id if channel else found.channel_id
+        target_ch = channel or interaction.guild.get_channel(new_channel_id)
+        if isinstance(target_ch, discord.TextChannel) and (channel is not None or new_threads):
+            missing = missing_channel_perms(target_ch) if channel is not None else []
+            perms = target_ch.permissions_for(interaction.guild.me)
+            if new_threads:
+                missing += [name for attr, name in (("create_public_threads", "Create Public Threads"),
+                                                    ("send_messages_in_threads", "Send Messages in Threads"))
+                            if not getattr(perms, attr)]
+            if missing:
+                raise UserError(f"I'm missing {', '.join(missing)} in {target_ch.mention}.")
+
+        for other in await self.bot.db.list_pr_trackers(interaction.guild.id):
+            if other.id != found.id and (other.repo_id, other.channel_id, other.branch) == (
+                found.repo_id, new_channel_id, new_branch
+            ):
+                raise UserError(f"<#{new_channel_id}> already has cards for **{found.full_name}** (#{other.id}).")
+
+        new_drafts = found.include_drafts if include_drafts is None else include_drafts
+        new_bots = found.include_bots if include_bots is None else include_bots
+        new_mention_id = None if clear_mention else (mention.id if mention else found.mention_role_id)
+
+        updated = await self.bot.db.update_pr_tracker(
+            found.id, interaction.guild.id,
+            channel_id=new_channel_id, branch=new_branch,
+            include_drafts=new_drafts, include_bots=new_bots,
+            threads=new_threads, mention_role_id=new_mention_id,
+        )
+        assert updated is not None
+        await interaction.response.send_message(
+            f"✅ Updated PR cards **#{updated.id}**: {updated.describe()}.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @app_commands.command(name="stop", description="Stop updating PR cards (the cards stay)")
     @app_commands.autocomplete(tracker=_tracker_autocomplete)
     @bot_admin()

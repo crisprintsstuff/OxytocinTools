@@ -282,7 +282,11 @@ class PRCardManager:
 
     async def update_all(self) -> None:
         async with self._lock:
+            ready = getattr(self.bot, "is_ready", lambda: False)()
+            has_get_guild = hasattr(self.bot, "get_guild")
             for tracker in await self.bot.db.list_pr_trackers():
+                if ready and has_get_guild and self.bot.get_guild(tracker.guild_id) is None:
+                    continue
                 try:
                     await self._sync(tracker)
                 except RateLimited:
@@ -372,6 +376,11 @@ class PRCardManager:
             return None
 
         channel = self.bot.get_channel(tracker.channel_id)
+        if channel is None and hasattr(self.bot, "fetch_channel"):
+            try:
+                channel = await self.bot.fetch_channel(tracker.channel_id)
+            except discord.HTTPException:
+                channel = None
         if not isinstance(channel, discord.TextChannel):
             return "The channel is gone or isn't a text channel"
         try:

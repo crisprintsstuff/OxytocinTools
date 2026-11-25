@@ -350,9 +350,9 @@ class GitHubClient:
                     await self.create_ref(owner, name, f"refs/heads/{branch}", sha)
                     self._known_branches.add((repo_key, branch))
             except Exception as exc:
-                log.debug("Couldn't ensure branch %s in %s/%s (%s); trying %s",
-                          branch, owner, name, exc, default_branch)
-                target_branch = default_branch
+                log.warning("Couldn't ensure branch %s in %s/%s (%s); skipping GitHub upload",
+                            branch, owner, name, exc)
+                return None
 
         clean_name = re.sub(r"[^\w.-]", "_", filename).lstrip(".")
         if not clean_name:

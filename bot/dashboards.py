@@ -278,7 +278,11 @@ class DashboardManager:
         return render_pr_dashboard(dash, open_prs, statuses, closed, interval=self.bot.poller.interval)
 
     async def refresh_all(self) -> None:
+        ready = getattr(self.bot, "is_ready", lambda: False)()
+        has_get_guild = hasattr(self.bot, "get_guild")
         for dash in await self.bot.db.list_dashboards():
+            if ready and has_get_guild and self.bot.get_guild(dash.guild_id) is None:
+                continue
             try:
                 await self.refresh(dash)
             except Exception:
@@ -319,7 +323,9 @@ class DashboardManager:
             except (discord.NotFound, discord.Forbidden):
                 await db.set_dashboard_error(dash.id, "Channel is gone or I can't see it")
                 return
-            assert isinstance(channel, discord.TextChannel)
+            if not isinstance(channel, discord.TextChannel):
+                await db.set_dashboard_error(dash.id, "Channel is not a text channel")
+                return
 
             view = dashboard_view(dash)
             message_id = dash.message_id

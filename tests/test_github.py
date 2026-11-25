@@ -125,3 +125,26 @@ async def test_upload_attachment(gh):
     # Huge file is rejected:
     huge = b"x" * (26 * 1024 * 1024)
     assert await gh.upload_attachment("o", "r", "main", "huge.bin", huge) is None
+
+
+async def test_upload_attachment_does_not_fallback_to_default_branch(aiohttp_server_factory):
+    from aiohttp import web
+
+    async def fail_ref(request):
+        return web.json_response({"message": "Forbidden"}, status=403)
+
+    app = web.Application()
+    app.router.add_get("/repos/o/r/git/ref/{ref:.+}", fail_ref)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+
+    client = GitHubClient("tok", base_url=f"http://127.0.0.1:{port}")
+    await client.start()
+    try:
+        assert await client.upload_attachment("o", "r", "main", "pic.png", b"data") is None
+    finally:
+        await client.close()
+        await runner.cleanup()

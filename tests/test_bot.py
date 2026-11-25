@@ -37,12 +37,12 @@ async def test_all_commands_register():
     assert menu is not None and menu.guild_only
     assert groups == {
         "repo": ["info", "latest", "list", "track", "untrack"],
-        "route": ["add", "list", "remove", "test", "toggle"],
-        "admin": ["check-now", "clear-role", "issue-access", "issue-role", "set-role", "status"],
+        "route": ["add", "edit", "list", "remove", "test", "toggle"],
+        "admin": ["check-now", "clear-role", "export", "import", "issue-access", "issue-role", "set-role", "status", "sync"],
         "issue": ["create"],
         "dashboard": ["create", "list", "remove"],
-        "watch": ["forum", "list", "remove", "role"],
-        "pr": ["list", "stop", "track"],
+        "watch": ["edit", "forum", "list", "remove", "role"],
+        "pr": ["edit", "list", "stop", "track"],
         "Create GitHub issue": [],
     }
     # Payloads must serialise (catches invalid option definitions).
@@ -80,4 +80,37 @@ async def test_unknown_command_gets_friendly_message():
     await bot.on_app_command_error(interaction, app_commands.CommandNotFound("github", []))
     message = interaction.response.send_message.call_args.args[0]
     assert "left over" in message and "/repo track" in message
+    await bot.close()
+
+
+async def test_on_guild_remove_preserves_config(db):
+    from types import SimpleNamespace
+
+    bot = TrackerBot(Config(discord_token="x", database_path=":memory:"))
+    bot.db = db
+    repo = await db.add_repo(42, "o", "r", "main", None)
+    await db.add_watch(repo, "role", role_id=99, label="bug")
+
+    await bot.on_guild_remove(SimpleNamespace(id=42, name="TestGuild"))
+    assert len(await db.list_repos(42)) == 1
+    assert len(await db.list_watches(42)) == 1
+    await bot.close()
+
+
+async def test_sync_commands_skips_when_unchanged(db, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    bot = TrackerBot(Config(discord_token="x", database_path=":memory:"))
+    bot.db = db
+    for ext in EXTENSIONS:
+        await bot.load_extension(ext)
+    sync = AsyncMock(return_value=[object(), object()])
+    monkeypatch.setattr(bot.tree, "sync", sync)
+
+    await bot.sync_commands()
+    assert sync.await_count == 1
+    await bot.sync_commands()  # unchanged hash -> skipped
+    assert sync.await_count == 1
+    await bot.sync_commands(force=True)
+    assert sync.await_count == 2
     await bot.close()

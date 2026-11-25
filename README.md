@@ -125,6 +125,8 @@ application.
 | `POLL_INTERVAL` | `300`             | Seconds between checks (minimum 60)                 |
 | `RELEASE_NOTES_WAIT` | `30`         | Minutes to hold back a release with empty notes (0 = off) |
 | `DATABASE_PATH` | `data/tracker.db` | SQLite file location                                |
+| `CONFIG_BACKUP_PATH` | `data/config-backup.json` | Portable JSON mirror of server config (`off` to disable) |
+| `DB_BACKUP_COUNT` | `7`             | Rolling SQLite backups to keep in `data/backups/` (`0` to disable) |
 | `BOT_OWNER_IDS` | *(none)*          | Comma-separated user IDs with admin rights everywhere |
 | `ISSUE_COOLDOWN`| `60`              | Seconds between issues per non-admin user (0 = off) |
 | `LOG_LEVEL`     | `INFO`            | Python log level                                    |
@@ -150,6 +152,7 @@ A repo can have any number of routes.
 | Command | Description |
 |---|---|
 | 🔒 `/route add <repo> <channel> <event> [release_kind] [tag_pattern] [branch] [mention] [publish] [pr_events] [include_drafts] [include_bots]` | Create a route. |
+| 🔒 `/route edit <route> [...]` | Update a route's channel, filters, mention, or publish setting without recreating it. |
 | 🔒 `/route list [repo]` | Show routes, including paused ones and their errors. |
 | 🔒 `/route toggle <route>` | Pause or resume a route. |
 | 🔒 `/route remove <route>` | Delete a route. |
@@ -214,6 +217,7 @@ The reporter is credited, and the usual issue-access rules and cooldown apply.
 |---|---|
 | 🔒 `/watch role <role> <repo> [label] [channel]` | Messages that mention `role` become issues in `repo`, with `label`. Optionally only in one channel (and its threads). |
 | 🔒 `/watch forum <forum> <repo> [label] [close_posts]` | Every new post in a forum channel becomes an issue. |
+| 🔒 `/watch edit <watch> [...]` | Update a watch's role, channel, label, or `close_posts` setting. |
 | 🔒 `/watch list` / `/watch remove <watch>` | Show or stop watches. |
 
 **Role mentions**
@@ -256,6 +260,7 @@ One live card per open pull request, kept up to date, with a thread logging ever
 | Command | Description |
 |---|---|
 | 🔒 `/pr track <repo> <channel> [branch] [include_drafts] [include_bots] [threads] [mention]` | Post a card for each open PR in `channel`, and one for each new PR as it opens. |
+| 🔒 `/pr edit <tracker> [...]` | Update a PR card tracker's channel, branch filter, thread mode, or mention role. |
 | 🔒 `/pr list` | Show trackers, how many open PRs each has, and any errors. |
 | 🔒 `/pr stop <tracker>` | Stop updating the cards. The cards stay where they are. |
 
@@ -344,6 +349,9 @@ the GitHub App's **Checks** and **Commit statuses** permissions.
 | 🔒 `/admin issue-role [role]` | Set the role used by the **admins + issue role** level. Leave it empty to clear. |
 | 🔒 `/admin status` | Poll timing, GitHub rate limit, issue settings, and any failing routes or feeds. |
 | 🔒 `/admin check-now` | Poll GitHub immediately. |
+| 🔒 `/admin export` | Download this server's configuration as a JSON file. |
+| 🔒 `/admin import <file>` | Restore server configuration from a JSON export (existing items are kept). |
+| 🔒 `/admin sync` | Force-sync global slash commands with Discord. |
 
 ## Example: routing releases
 
@@ -410,10 +418,40 @@ its filters, oldest first.
   a fresh baseline instead of replaying everything that happened in between.
 - If the bot loses access to a channel, or the channel is deleted, the route is paused and
   the error appears in `/route list` and `/admin status`.
-- If the bot is removed from a server, that server's configuration is deleted.
+- If the bot is removed from a server, its configuration is kept in the database (polling and updates are skipped until it's re-invited).
 - **Authentication:** for each repo the bot uses the GitHub App's installation token if the
   app is installed on that repo. Otherwise it uses `GITHUB_TOKEN`, or anonymous access.
   Each has its own rate limit (installations get 5000+/hour), and `/admin status` shows them all.
+
+## Persistence, backups & running as a service
+
+- **Path anchoring:** Relative `DATABASE_PATH`, `GITHUB_APP_PRIVATE_KEY_PATH`, and `CONFIG_BACKUP_PATH` values resolve against the repository root regardless of the working directory you launch the bot from.
+- **SQLite durability & rolling backups:** The database runs in WAL mode with `busy_timeout`, checkpoints passively after each poll cycle, truncates on clean shutdown, and writes rolling online backups to `data/backups/` on startup and once every 24 hours (`DB_BACKUP_COUNT`, default `7`).
+- **Config mirror & auto-restore:** Every configuration change is atomically mirrored to `data/config-backup.json` (`CONFIG_BACKUP_PATH`). If the bot starts with an empty database and that file exists, it automatically restores your servers, repos, routes, dashboards, watches, and PR trackers. You can also use `/admin export` and `/admin import` at any time.
+- **Slash command sync:** Global slash commands are only synced with Discord when the command schema actually changes (tracked via `commands_hash` in SQLite), or on demand via `/admin sync`.
+
+<details>
+<summary>Example systemd service (Linux)</summary>
+
+```ini
+[Unit]
+Description=OxytocinTools Discord GitHub Tracker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cris
+WorkingDirectory=/home/cris/oxylabs/OxytocinTools
+ExecStart=/home/cris/oxylabs/OxytocinTools/.venv/bin/python -m bot
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+</details>
 
 ## Development
 

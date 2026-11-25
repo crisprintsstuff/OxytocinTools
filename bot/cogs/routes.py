@@ -149,6 +149,135 @@ class Routes(commands.GroupCog, group_name="route",
         return [app_commands.Choice(name=v, value=v)
                 for v in dict.fromkeys(suggestions) if current.lower() in v.lower() or v == current.strip()][:25]
 
+    @app_commands.command(name="edit", description="Edit an existing route")
+    @app_commands.describe(
+        route_id="Route to edit",
+        channel="New channel to post in",
+        release_kind="Releases only: stable, pre-releases, or both",
+        tag_pattern="Releases only: glob or re:... filter (or 'none' to clear)",
+        branch="Commits: branch name. PRs: base branch filter (or 'none' to clear)",
+        mention="Role to ping with each post",
+        clear_mention="Remove the mention role",
+        publish="Auto-publish posts in an announcement channel",
+        pr_events="Pull requests only: comma-separated events (or 'all')",
+        include_drafts="Pull requests only: also post about draft PRs",
+        include_bots="Pull requests only: also post about bot PRs",
+    )
+    @app_commands.choices(release_kind=KIND_CHOICES)
+    @app_commands.autocomplete(route_id=route_autocomplete, pr_events=_pr_events_autocomplete)
+    @app_commands.rename(route_id="route")
+    @bot_admin()
+    async def edit(self, interaction: discord.Interaction, route_id: int,
+                   channel: discord.TextChannel | None = None,
+                   release_kind: app_commands.Choice[str] | None = None,
+                   tag_pattern: str | None = None, branch: str | None = None,
+                   mention: discord.Role | None = None, clear_mention: bool = False,
+                   publish: bool | None = None, pr_events: str | None = None,
+                   include_drafts: bool | None = None,
+                   include_bots: bool | None = None) -> None:
+        assert interaction.guild is not None
+        route = await self._get(interaction, route_id)
+        if route.event_type != "releases" and (release_kind or tag_pattern is not None):
+            raise UserError("`release_kind` and `tag_pattern` only apply to release routes.")
+        if route.event_type not in ("commits", "pulls") and branch is not None:
+            raise UserError("`branch` only applies to commit and pull request routes.")
+        if route.event_type != "pulls" and (
+            pr_events is not None or include_drafts is not None or include_bots is not None
+        ):
+            raise UserError("`pr_events`, `include_drafts` and `include_bots` only apply to "
+                            "pull request routes.")
+        if clear_mention and mention is not None:
+            raise UserError("Choose either `mention` or `clear_mention`, not both.")
+        if mention and mention.is_default():
+            raise UserError("Pinging @everyone isn't supported; pick a role.")
+
+        if channel and (missing := missing_channel_perms(channel)):
+            raise UserError(f"I'm missing {', '.join(missing)} in {channel.mention}.")
+        new_channel_id = channel.id if channel else route.channel_id
+        new_publish = route.crosspost if publish is None else publish
+        target_ch = channel or interaction.guild.get_channel(new_channel_id)
+        if new_publish and (not isinstance(target_ch, discord.TextChannel) or not target_ch.is_news()):
+            raise UserError("The target channel isn't an announcement channel, so posts can't be published.")
+
+        new_kind = release_kind.value if release_kind else route.release_kind
+        new_tag = route.tag_pattern
+        if tag_pattern is not None:
+            cleaned_tag = tag_pattern.strip()
+            if not cleaned_tag or cleaned_tag.lower() in ("none", "-"):
+                new_tag = None
+            else:
+                try:
+                    validate_pattern(cleaned_tag)
+                except ValueError as exc:
+                    raise UserError(str(exc)) from exc
+                new_tag = cleaned_tag
+
+        new_branch = route.branch
+        if branch is not None:
+            cleaned_branch = branch.strip()
+            if route.event_type == "commits":
+                if not cleaned_branch or cleaned_branch.lower() in ("none", "-"):
+                    raise UserError("Commit routes require a branch.")
+                new_branch = cleaned_branch
+            else:
+                if not cleaned_branch or cleaned_branch.lower() in ("none", "-"):
+                    new_branch = None
+                else:
+                    try:
+                        validate_pattern(cleaned_branch)
+                    except ValueError as exc:
+                        raise UserError(str(exc)) from exc
+                    new_branch = cleaned_branch
+
+        new_pr_events = route.pr_events
+        if pr_events is not None:
+            try:
+                new_pr_events = ",".join(parse_pr_events(pr_events))
+            except ValueError as exc:
+                raise UserError(str(exc)) from exc
+
+        new_drafts = route.include_drafts if include_drafts is None else include_drafts
+        new_bots = route.include_bots if include_bots is None else include_bots
+        new_mention_id = None if clear_mention else (mention.id if mention else route.mention_role_id)
+
+        for existing in await self.bot.db.list_routes(route.guild_id, route.repo_id):
+            if existing.id != route.id and (
+                existing.channel_id, existing.event_type, existing.release_kind,
+                existing.tag_pattern, existing.branch, existing.pr_events,
+                existing.include_drafts, existing.include_bots,
+            ) == (
+                new_channel_id, route.event_type, new_kind, new_tag,
+                new_branch, new_pr_events, new_drafts, new_bots,
+            ):
+                raise UserError(f"An identical route already exists (#{existing.id}).")
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        branch_changed = route.event_type == "commits" and new_branch != route.branch
+        if branch_changed:
+            try:
+                await self.bot.github.get_branch(route.owner, route.name, new_branch)  # type: ignore[arg-type]
+            except NotFound:
+                raise UserError(f"Branch `{new_branch}` doesn't exist in {route.full_name}.")
+
+        updated = await self.bot.db.update_route(
+            route.id, route.guild_id,
+            channel_id=new_channel_id, release_kind=new_kind, tag_pattern=new_tag,
+            branch=new_branch, mention_role_id=new_mention_id, crosspost=new_publish,
+            pr_events=new_pr_events, include_drafts=new_drafts, include_bots=new_bots,
+        )
+        assert updated is not None
+        if branch_changed and updated.enabled:
+            try:
+                await self.bot.poller.ensure_baseline(updated)
+            except GitHubError:
+                pass
+        await interaction.followup.send(
+            f"✅ Updated route **#{updated.id}**: **{updated.full_name}** → "
+            f"<#{updated.channel_id}> ({updated.describe()}).",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @app_commands.command(name="remove", description="Delete a route")
     @app_commands.autocomplete(route_id=route_autocomplete)
     @app_commands.rename(route_id="route")

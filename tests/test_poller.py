@@ -170,3 +170,19 @@ async def test_no_waiting_when_disabled(db):
     gh.feeds[("o/r", "releases")] = [notes_rel(1, "v1", "", age=5)]
     await poller.poll_once()
     assert len(sent) == 1
+
+
+async def test_poller_skips_inactive_guilds(db):
+    poller, gh, sent = await make(db)
+    poller._active_guilds = lambda: {1}
+    r1 = await db.add_repo(1, "o", "active", "main", None)
+    r2 = await db.add_repo(2, "o", "removed", "main", None)
+    await db.add_route(r1, 10, "releases")
+    await db.add_route(r2, 20, "releases")
+    gh.feeds[("o/active", "releases")] = []
+    gh.feeds[("o/removed", "releases")] = []
+
+    await poller.poll_once()
+    assert gh.calls == 1  # only guild 1's feed was polled
+    assert await db.get_stream("o/removed", "releases") is None
+    assert len(await db.list_repos(2)) == 1  # config remains intact

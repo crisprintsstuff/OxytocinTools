@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import os
+import time
 from typing import Any
 
 import discord
@@ -41,9 +45,57 @@ class TrackerBot(commands.Bot):
                          help_command=None)
         self.config = config
         self._cleaned_guild_commands = False
+        self._last_db_backup: float = 0.0
+
+    def _active_guild_ids(self) -> set[int] | None:
+        return {g.id for g in self.guilds} if self.is_ready() else None
+
+    def _commands_hash(self) -> str:
+        payload = json.dumps(
+            [c.to_dict(self.tree) for c in self.tree.get_commands()],
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    async def sync_commands(self, *, force: bool = False) -> int:
+        digest = self._commands_hash()
+        prev = await self.db.get_meta("commands_hash")
+        if not force and prev == digest:
+            count = len(self.tree.get_commands())
+            log.info("Slash commands unchanged (%d command(s)); skipping global sync", count)
+            return count
+        synced = await self.tree.sync()
+        await self.db.set_meta("commands_hash", digest)
+        log.info("Registered %d commands", len(synced))
+        return len(synced)
 
     async def setup_hook(self) -> None:
-        self.db = await Database.open(self.config.database_path)
+        self.db = await Database.open(
+            self.config.database_path,
+            config_backup_path=self.config.config_backup_path,
+        )
+        if self.config.config_backup_path:
+            if not await self.db.has_any_config() and os.path.exists(self.config.config_backup_path):
+                try:
+                    restored = await self.db.load_config_snapshot(self.config.config_backup_path)
+                    if restored:
+                        log.info("Restored configuration from %s: %s",
+                                 self.config.config_backup_path, restored)
+                except Exception as exc:
+                    log.warning("Couldn't restore config backup %s: %s",
+                                self.config.config_backup_path, exc)
+            elif await self.db.has_any_config():
+                try:
+                    await self.db.save_config_snapshot(self.config.config_backup_path)
+                except Exception as exc:
+                    log.warning("Couldn't write initial config backup %s: %s",
+                                self.config.config_backup_path, exc)
+        if self.config.backup_count > 0 and self.config.database_path != ":memory:":
+            try:
+                await self.db.backup(keep=self.config.backup_count)
+                self._last_db_backup = time.time()
+            except Exception as exc:
+                log.warning("Startup database backup failed: %s", exc)
         try:
             self.github = GitHubClient(self.config.github_token,
                                        app_id=self.config.github_app_id,
@@ -58,17 +110,16 @@ class TrackerBot(commands.Bot):
                              interval=self.config.poll_interval,
                              wait_until_ready=self.wait_until_ready,
                              after_cycle=self.after_poll,
-                             release_notes_wait=self.config.release_notes_wait * 60)
+                             release_notes_wait=self.config.release_notes_wait * 60,
+                             active_guilds=self._active_guild_ids)
         # Dashboard buttons keep working after restarts: their IDs encode the dashboard.
         self.add_dynamic_items(ReportButton, RefreshButton, CloseFiledButton)
         for ext in EXTENSIONS:
             await self.load_extension(ext)
         self.tree.on_error = self.on_app_command_error
 
-        # Registering globally replaces the application's whole global command list,
-        # so commands left over from older code or another bot are removed.
-        synced = await self.tree.sync()
-        log.info("Registered %d commands", len(synced))
+        # Sync globally only when the command schema changes (or via /admin sync).
+        await self.sync_commands()
         if self.config.dev_guild_id:
             log.info("DEV_GUILD_ID is no longer used: commands are registered for all servers")
 
@@ -112,8 +163,8 @@ class TrackerBot(commands.Bot):
                 log.warning("Couldn't check leftover commands in %s: %s", guild.name, exc)
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
-        log.info("Removed from guild %s; deleting its configuration", guild.id)
-        await self.db.delete_guild(guild.id)
+        log.warning("Removed from guild %s (%s); keeping its configuration in the database",
+                    guild.id, guild.name)
 
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
         removed = await self.db.remove_routes_for_channel(channel.id)
@@ -131,6 +182,14 @@ class TrackerBot(commands.Bot):
             await self.prcards.update_all()
         finally:
             self.prcards.end_cycle()
+        await self.db.checkpoint("PASSIVE")
+        if (self.config.backup_count > 0 and self.config.database_path != ":memory:"
+                and time.time() - self._last_db_backup >= 86400):
+            try:
+                await self.db.backup(keep=self.config.backup_count)
+                self._last_db_backup = time.time()
+            except Exception as exc:
+                log.warning("Periodic database backup failed: %s", exc)
 
     async def on_message(self, message: discord.Message) -> None:
         try:

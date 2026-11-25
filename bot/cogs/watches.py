@@ -144,6 +144,92 @@ class Watches(commands.GroupCog, group_name="watch",
                                                 ephemeral=True,
                                                 allowed_mentions=discord.AllowedMentions.none())
 
+    @app_commands.command(name="edit", description="Edit an existing watch")
+    @app_commands.describe(
+        watch="The watch to edit",
+        role="Role watches only: new trigger role",
+        channel="New channel (text channel for role watch, forum for forum watch)",
+        clear_channel="Role watches only: watch all channels in the server",
+        label="New GitHub label to apply",
+        clear_label="Remove the fixed GitHub label",
+        close_posts="Forum watches only: close and lock posts when issues close",
+    )
+    @app_commands.autocomplete(watch=_watch_autocomplete)
+    @bot_admin()
+    async def edit(self, interaction: discord.Interaction, watch: int,
+                   role: discord.Role | None = None,
+                   channel: discord.TextChannel | discord.ForumChannel | None = None,
+                   clear_channel: bool = False, label: str | None = None,
+                   clear_label: bool = False, close_posts: bool | None = None) -> None:
+        assert interaction.guild is not None
+        found = await self.bot.db.get_watch(interaction.guild.id, watch)
+        if found is None:
+            raise UserError(f"Watch #{watch} doesn't exist. See `/watch list`.")
+        if clear_label and label is not None:
+            raise UserError("Choose either `label` or `clear_label`, not both.")
+        if clear_channel and channel is not None:
+            raise UserError("Choose either `channel` or `clear_channel`, not both.")
+
+        new_label = None if clear_label else (
+            (label.strip() or None) if label is not None else found.label
+        )
+
+        if found.kind == "role":
+            if close_posts is not None:
+                raise UserError("`close_posts` only applies to forum watches.")
+            if isinstance(channel, discord.ForumChannel):
+                raise UserError("Role watches require a text channel, not a forum channel.")
+            new_role_id = found.role_id
+            if role is not None:
+                if role.is_default():
+                    raise UserError("Pick a specific role, not @everyone.")
+                if role.managed:
+                    raise UserError(f"{role.mention} belongs to an integration and can't be used.")
+                for other in await self.bot.db.list_watches(interaction.guild.id, "role"):
+                    if other.id != found.id and other.role_id == role.id and other.repo_id == found.repo_id:
+                        raise UserError(
+                            f"{role.mention} already files issues in **{found.full_name}** (watch #{other.id})."
+                        )
+                new_role_id = role.id
+            new_channel_id = None if clear_channel else (channel.id if channel else found.channel_id)
+            new_close = found.close_threads
+        else:
+            if role is not None:
+                raise UserError("`role` only applies to role watches.")
+            if clear_channel:
+                raise UserError("Forum watches require a forum channel.")
+            if isinstance(channel, discord.TextChannel):
+                raise UserError("Forum watches require a forum channel, not a text channel.")
+            new_role_id = None
+            new_channel_id = found.channel_id
+            if channel is not None:
+                perms = channel.permissions_for(interaction.guild.me)
+                missing = [name for attr, name in (("view_channel", "View Channel"),
+                                                   ("send_messages_in_threads", "Send Messages in Threads"),
+                                                   ("read_message_history", "Read Message History"))
+                           if not getattr(perms, attr)]
+                if missing:
+                    raise UserError(f"I'm missing {', '.join(missing)} in {channel.mention}.")
+                for other in await self.bot.db.list_watches(interaction.guild.id, "forum"):
+                    if other.id != found.id and other.channel_id == channel.id and other.repo_id == found.repo_id:
+                        raise UserError(
+                            f"{channel.mention} already files issues in **{found.full_name}** (watch #{other.id})."
+                        )
+                new_channel_id = channel.id
+            new_close = found.close_threads if close_posts is None else close_posts
+
+        updated = await self.bot.db.update_watch(
+            found.id, interaction.guild.id,
+            role_id=new_role_id, channel_id=new_channel_id,
+            label=new_label, close_threads=new_close,
+        )
+        assert updated is not None
+        await interaction.response.send_message(
+            f"✅ Updated watch **#{updated.id}**: {updated.describe()}.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @app_commands.command(name="remove", description="Stop a watch")
     @app_commands.autocomplete(watch=_watch_autocomplete)
     @bot_admin()

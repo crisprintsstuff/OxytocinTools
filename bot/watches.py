@@ -336,7 +336,11 @@ class WatchManager:
     # ------------------------------------------------------ forum post closing
     async def sync_threads(self) -> None:
         """Close and tag forum posts whose GitHub issue was closed."""
+        ready = getattr(self.bot, "is_ready", lambda: False)()
+        has_get_guild = hasattr(self.bot, "get_guild")
         for filing in await self.bot.db.open_thread_filings():
+            if ready and has_get_guild and self.bot.get_guild(filing.guild_id) is None:
+                continue
             try:
                 await self._sync_thread(filing)
             except RateLimited:

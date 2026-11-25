@@ -85,11 +85,13 @@ class Poller:
     def __init__(self, db: Database, github: GitHubClient, sender: Sender,
                  interval: int = 300, wait_until_ready: Callable[[], Awaitable[Any]] | None = None,
                  after_cycle: Callable[[], Awaitable[Any]] | None = None,
-                 release_notes_wait: int = 0):
+                 release_notes_wait: int = 0,
+                 active_guilds: Callable[[], set[int] | None] | None = None):
         self.db = db
         # Seconds to hold back a new release whose notes are still empty (0 = don't wait).
         self.release_notes_wait = release_notes_wait
         self._after_cycle = after_cycle
+        self._active_guilds = active_guilds
         self.github = github
         self.sender = sender
         self.interval = interval
@@ -146,6 +148,10 @@ class Poller:
         async with self._lock:
             started = time.monotonic()
             routes = await self.db.list_enabled_routes()
+            if self._active_guilds is not None:
+                active = self._active_guilds()
+                if active is not None:
+                    routes = [r for r in routes if r.guild_id in active]
             groups: dict[tuple[str, str], list[Route]] = defaultdict(list)
             for route in routes:
                 groups[(route.repo_key, route.stream)].append(route)

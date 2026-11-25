@@ -234,3 +234,15 @@ async def test_checks_permission_and_deleted_card(db):
     assert len(channel.sent) == 2 and channel.sent[1][0] is None  # re-posted, no second ping
     (card,) = await db.list_pr_cards(tracker.id)
     assert card.message_id == 501 and card.thread_id == 1400  # keeps its original thread
+
+
+async def test_pr_cards_fetch_channel_fallback(db):
+    from unittest.mock import AsyncMock
+
+    manager, tracker, gh, channel = await setup(db)
+    manager.bot.get_channel = lambda cid: None
+    manager.bot.fetch_channel = AsyncMock(return_value=channel)
+    serve(gh, [pr(1)])
+    await manager.refresh_all()
+    manager.bot.fetch_channel.assert_awaited_with(10)
+    assert len(channel.sent) == 1
