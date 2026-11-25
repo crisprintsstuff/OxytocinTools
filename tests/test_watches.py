@@ -297,3 +297,63 @@ async def test_forum_starter_is_not_filed_twice_by_a_role_mention(db):
     starter.channel = FakeThread(FakeForum([]))  # forum id 300, thread id 400 == message id
     await manager.on_message(starter)
     assert bot.github.create_issue.await_count == 0
+
+
+async def test_forum_resolves_plain_user_to_member_for_role_and_admin_checks(db):
+    manager, bot, repo, _ = await setup(db)
+    await db.set_issue_access(1, "role")
+    await db.set_issue_role(1, 777)
+    await db.add_watch(repo, "forum", channel_id=300)
+
+    tester_member = member(5, "Alice")
+    tester_member.roles = [SimpleNamespace(id=777)]
+    plain_user = MagicMock(spec=discord.User)
+    plain_user.id, plain_user.name, plain_user.display_name, plain_user.bot = 5, "alice", "Alice", False
+
+    forum = FakeForum([])
+    thread = FakeThread(forum)
+    starter = message(400, plain_user, "Crash when exporting", roles=())
+    starter.guild = SimpleNamespace(
+        id=1, name="Srv",
+        get_member=lambda _uid: None,
+        fetch_member=AsyncMock(return_value=tester_member),
+    )
+    thread.starter = starter
+
+    await manager.on_thread_create(thread)
+    assert bot.github.create_issue.await_count == 1
+    starter.guild.fetch_member.assert_awaited_once_with(5)
+
+    # Without the tester role, it is blocked
+    no_role_member = member(6, "Bob")
+    plain_bob = MagicMock(spec=discord.User)
+    plain_bob.id, plain_bob.name, plain_bob.display_name, plain_bob.bot = 6, "bob", "Bob", False
+    starter2 = message(401, plain_bob, "Another crash", roles=())
+    starter2.guild = SimpleNamespace(
+        id=1, name="Srv",
+        get_member=lambda _uid: None,
+        fetch_member=AsyncMock(return_value=no_role_member),
+    )
+    thread2 = FakeThread(forum)
+    thread2.id = 401
+    thread2.starter = starter2
+    await manager.on_thread_create(thread2)
+    assert bot.github.create_issue.await_count == 1
+    assert "You need the <@&777> role" in starter2.reply.call_args.args[0]
+
+    # Admin user (manage_guild=True) resolved via fetch_member when issue_access is 'admins'
+    await db.set_issue_access(1, "admins")
+    admin_member = member(7, "Admin", admin=True)
+    plain_admin = MagicMock(spec=discord.User)
+    plain_admin.id, plain_admin.name, plain_admin.display_name, plain_admin.bot = 7, "admin", "Admin", False
+    starter3 = message(402, plain_admin, "Admin report", roles=())
+    starter3.guild = SimpleNamespace(
+        id=1, name="Srv",
+        get_member=lambda _uid: None,
+        fetch_member=AsyncMock(return_value=admin_member),
+    )
+    thread3 = FakeThread(forum)
+    thread3.id = 402
+    thread3.starter = starter3
+    await manager.on_thread_create(thread3)
+    assert bot.github.create_issue.await_count == 2

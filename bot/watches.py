@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 
 import discord
 
-from .checks import UserError, member_can_create_issue, member_is_admin
+from .checks import UserError, member_can_create_issue, member_is_admin, resolve_member
 from .cogs.issues import (
     find_similar_issues,
     format_attachments,
@@ -446,7 +446,7 @@ class WatchManager:
                                         f"(<{existing.issue_url}>).")
             return None
 
-        filer = trigger.author
+        filer = await resolve_member(guild, trigger.author) or trigger.author
         allowed, reason = await member_can_create_issue(bot, guild, filer, repo)
         if not allowed:
             await self._notice(trigger, f"🚫 {reason}")
