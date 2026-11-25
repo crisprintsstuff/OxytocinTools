@@ -19,6 +19,13 @@ pre-releases to `#beta-testers`, `v2.*` tags to `#v2`, and so on.
   posts are capped per cycle
 - SQLite storage, no external services needed
 
+## Documentation
+
+Full guides live in **[`docs/`](docs/README.md)**:
+
+- **[Bot Management & Operations Guide](docs/management.md)** — Discord & GitHub App setup, `.env` variables, `systemd` / Docker deployment, SQLite WAL & backups, webhooks, alerts, and troubleshooting.
+- **Per-command Guides:** [`/repo`](docs/commands/repo.md) · [`/route`](docs/commands/route.md) · [`/issue`](docs/commands/issue.md) · [`/watch`](docs/commands/watch.md) · [`/pr`](docs/commands/pr.md) · [`/dashboard`](docs/commands/dashboard.md) · [`/digest`](docs/commands/digest.md) · [`/showcase`](docs/commands/showcase.md) · [`/admin`](docs/commands/admin.md)
+
 ## Setup
 
 ### 1. Create the Discord application
@@ -509,16 +516,21 @@ Layout:
 
 ```
 bot/
-  main.py      bot class, message delivery, error handling
-  poller.py    polling loop, baselines, routing new items to routes
-  github.py    GitHub REST client (ETags, rate limits)
-  db.py        SQLite storage
-  models.py    Repo/Route models, filters, repo parsing
-  embeds.py    Discord embed formatting
-  checks.py    admin permission check
+  main.py        bot class, message delivery, error handling
+  poller.py      polling loop, baselines, routing new items to routes
+  github.py      GitHub REST client (ETags, rate limits)
+  db.py          SQLite storage, backups, config export/import
+  models.py      dataclasses, filters, repo parsing
+  embeds.py      Discord embed formatting
+  checks.py      admin & issue-access permission checks
   dashboards.py  live issue and PR dashboards: rendering, refreshing, buttons
-  watches.py   role-mention and forum watches that file issues, and closing forum posts
-  prcards.py   live PR cards: check and review summaries, the timeline, keeping cards updated
-  cogs/        slash commands: repos.py, routes.py, issues.py, dashboards.py, watches.py, prs.py, admin.py
+  watches.py     role-mention and forum watches, two-way comment sync
+  prcards.py     live PR cards: check/review summaries, timeline threads
+  digests.py     scheduled changelog and stale review nudge digests
+  showcases.py   live edit-in-place file and release showcase boards
+  webhook.py     optional HMAC-verified GitHub webhook trigger server
+  cogs/          repos.py, routes.py, issues.py, dashboards.py, watches.py,
+                 prs.py, digests.py, showcases.py, admin.py
+docs/            management guide and per-command reference docs
 tests/
 ```
