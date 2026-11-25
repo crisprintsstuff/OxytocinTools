@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from types import SimpleNamespace
 
 import discord
@@ -14,6 +15,7 @@ from bot.showcases import (
     MAX_MESSAGES,
     ShowcaseManager,
     clean_markdown,
+    extract_hero_image,
     extract_section,
     render_file_showcase,
     render_releases_showcase,
@@ -290,3 +292,204 @@ async def test_github_file_and_releases_methods():
 
     rels, rel_etag = await gh.list_releases("Org", "App", per_page=10)
     assert rels == [{"tag_name": "v1.0.0"}] and rel_etag == '"rel-1"'
+
+
+def test_clean_markdown_github_readme_html_badges_nav_and_hero():
+    readme = """<p align="center">
+  <img src="docs/images/banner.png" alt="App Banner" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/org/app/releases"><img alt="release" src="https://img.shields.io/github/v/release/org/app"></a>
+  <a href="https://github.com/org/app/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/org/app/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="stage" src="https://img.shields.io/badge/stage-beta-blue">
+  <a href="#license"><img alt="license" src="https://img.shields.io/badge/license-MIT-4c1"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/org/app/releases/tag/v1.0"><b>Download</b></a> ·
+  <a href="https://github.com/org/app/wiki"><b>Wiki &amp; Docs</b></a> ·
+  <a href="docs/TESTING_GUIDE.md">Testing guide</a> ·
+  <a href="#license">License</a>
+</p>
+
+![Screenshot](docs/images/screenshot.png)
+
+[![Build](https://img.shields.io/badge/build-passing-green)](https://ci.example.com)
+
+Read the [release notes](docs/releases/v1.0.md) for more details.
+"""
+    sc = Showcase(
+        id=1, repo_id=1, guild_id=10, owner="org", name="app",
+        channel_id=555, source="file", file_path="README.md", branch="main",
+    )
+    embeds, _ = render_file_showcase(sc, readme, default_branch="main", interval=300)
+    assert len(embeds) == 1
+    desc = embeds[0].description or ""
+
+    for bad in ("<p", "</p", "<a ", "</a>", "<img", "<b", "</b>", "![", "shields.io", "badge.svg"):
+        assert bad not in desc
+
+    assert (
+        "[**Download**](https://github.com/org/app/releases/tag/v1.0) · "
+        "[**Wiki & Docs**](https://github.com/org/app/wiki) · "
+        "[Testing guide](https://github.com/org/app/blob/main/docs/TESTING_GUIDE.md) · "
+        "[License](https://github.com/org/app/blob/main/README.md#license)"
+    ) in desc
+    assert "[release notes](https://github.com/org/app/blob/main/docs/releases/v1.0.md)" in desc
+    assert embeds[0].image.url == "https://raw.githubusercontent.com/org/app/main/docs/images/banner.png"
+
+
+def test_clean_markdown_html_formatting_lists_tables_and_entities():
+    raw = """<h2>What&#39;s New &amp; Improved</h2>
+<p>First <strong>bold</strong>, <em>italic</em>, <u>under</u>, <del>old</del>, and <code>inline()</code>.</p>
+<blockquote><p>Quoted &mdash; line 1<br>line 2</p></blockquote>
+<ul>
+  <li>Alpha<ul><li>Nested &nbsp; item</li></ul></li>
+  <li>Beta</li>
+</ul>
+<ol start="3">
+  <li>Third</li>
+  <li>Fourth</li>
+</ol>
+<table>
+  <tr><th>Feature</th><th>Status</th></tr>
+  <tr><td>Sync</td><td>Ready</td></tr>
+  <tr><td>OnlyCol</td><td></td></tr>
+</table>
+<table>
+  <tr><th>Name</th><th>Min</th><th>Max</th></tr>
+  <tr><td>Small</td><td>1k</td><td>10k</td></tr>
+</table>
+<table>
+  <tr><td><img src="a.png"></td><td><img src="b.png"></td></tr>
+</table>
+<pre><code class="language-rust">fn main() {}</code></pre>
+<style>.hidden { display: none; }</style>
+<script>alert("nope")</script>
+"""
+    cleaned = clean_markdown(raw)
+    assert "## What's New & Improved" in cleaned
+    assert "First **bold**, *italic*, __under__, ~~old~~, and `inline()`." in cleaned
+    assert "> Quoted — line 1" in cleaned
+    assert "> line 2" in cleaned
+    assert "- Alpha\n  - Nested   item" in cleaned or "- Alpha\n  - Nested item" in cleaned
+    assert "- Beta" in cleaned
+    assert "3. Third" in cleaned
+    assert "4. Fourth" in cleaned
+    assert "- **Sync:** Ready" in cleaned
+    assert "- OnlyCol" in cleaned
+    assert "- **Small** — Min: 1k · Max: 10k" in cleaned
+    assert "```\nfn main() {}\n```" in cleaned
+    assert "display: none" not in cleaned
+    assert "alert(" not in cleaned
+    assert "<" not in cleaned or "fn main" in cleaned
+
+
+def test_clean_markdown_preserves_code_discord_tokens_and_generics():
+    raw = (
+        "Released <t:1700000000:d> in <#123456> by <@789> — see <https://example.com>.\n\n"
+        "Use `<span>keep</span>` and `docs/guide.md` (`[keep](rel.md)`) and type `Vec<String>`.\n"
+        "Outside code: Vec<String> and Option<T> stay intact, while a < b && c > d.\n\n"
+        "```html\n"
+        "<div class=\"x\"><p>Keep HTML inside fenced code</p></div>\n"
+        "```\n"
+    )
+    cleaned = clean_markdown(raw, owner="org", name="app", ref="main", file_path="README.md")
+    assert "<t:1700000000:d>" in cleaned
+    assert "<#123456>" in cleaned
+    assert "<@789>" in cleaned
+    assert "<https://example.com>" in cleaned
+    assert "`<span>keep</span>`" in cleaned
+    assert "`[keep](rel.md)`" in cleaned
+    assert "Vec<String>" in cleaned
+    assert "Option<T>" in cleaned
+    assert "a < b && c > d" in cleaned
+    assert '<div class="x"><p>Keep HTML inside fenced code</p></div>' in cleaned
+
+
+def test_section_showcase_scopes_hero_image_and_relative_subdir_links():
+    readme = """<p align="center"><img src="docs/images/banner.png"></p>
+
+## Other
+Intro text.
+
+## Highlights
+- Added [the guide](sub/guide.md) and [parent](../TOP.md).
+"""
+    sc_sec = Showcase(
+        id=2, repo_id=1, guild_id=10, owner="org", name="app",
+        channel_id=555, source="file", file_path="docs/README.md",
+        branch="main", section="Highlights",
+    )
+    embeds, _ = render_file_showcase(sc_sec, readme, default_branch="main", interval=300)
+    assert embeds[0].image.url is None
+    desc = embeds[0].description or ""
+    assert "[the guide](https://github.com/org/app/blob/main/docs/sub/guide.md)" in desc
+    assert "[parent](https://github.com/org/app/blob/main/TOP.md)" in desc
+
+    assert extract_hero_image(
+        "[![b](https://img.shields.io/badge/x-y-blue)](https://x.com)\n![Shot](docs/shot.jpg)",
+        owner="org", name="app", ref="main", file_path="README.md",
+    ) == "https://raw.githubusercontent.com/org/app/main/docs/shot.jpg"
+
+
+async def test_showcase_http_cache_roundtrip_and_legacy_double_encoded_recovery(db: Database):
+    repo = await db.add_repo(100, "Org", "App", "main", 1)
+    sc_file = await db.add_showcase(repo, 555, "file", file_path="README.md")
+    sc_rel = await db.add_showcase(repo, 556, "releases")
+    ch_file = _FakeChannel(555)
+    ch_rel = _FakeChannel(556)
+
+    file_calls: list[str | None] = []
+    rel_calls: list[str | None] = []
+
+    async def fake_get_file(owner, name, path, ref=None, etag=None):
+        file_calls.append(etag)
+        if etag == '"f-1"':
+            return None, '"f-1"'
+        if etag == '"f-2"':
+            return None, '"f-2"'
+        return "<b>Fresh</b>", '"f-2"' if file_calls.count(None) > 1 else '"f-1"'
+
+    async def fake_list_rels(owner, name, per_page=30, etag=None):
+        rel_calls.append(etag)
+        if etag == '"r-1"':
+            return None, '"r-1"'
+        return [{
+            "tag_name": "v1.0.0", "name": "v1.0.0", "prerelease": False, "draft": False,
+            "html_url": "https://github.com/Org/App/releases/tag/v1.0.0",
+            "published_at": "2026-10-01T12:00:00Z",
+            "body": "<p>First release</p>",
+        }], '"r-1"'
+
+    def _get_ch(cid):
+        return ch_file if cid == 555 else (ch_rel if cid == 556 else None)
+
+    bot = SimpleNamespace(
+        db=db,
+        poller=SimpleNamespace(interval=300),
+        github=SimpleNamespace(get_file_content=fake_get_file, list_releases=fake_list_rels),
+        get_channel=_get_ch,
+    )
+
+    mgr1 = ShowcaseManager(bot)  # type: ignore[arg-type]
+    await mgr1.refresh(sc_file)
+    await mgr1.refresh(sc_rel)
+
+    # Simulate restart with a fresh ShowcaseManager loading ETag + body from SQLite http_cache.
+    mgr2 = ShowcaseManager(bot)  # type: ignore[arg-type]
+    await mgr2.refresh(sc_file, force=True)
+    await mgr2.refresh(sc_rel, force=True)
+    assert file_calls == [None, '"f-1"']
+    assert rel_calls == [None, '"r-1"']
+    assert ch_rel.edits and "First release" in (ch_rel.edits[-1][1].description or "")
+
+    # Seed legacy double-encoded string in http_cache and verify recovery.
+    cache_key = "sc:file:org/app:main:README.md"
+    await db.set_http_cache(cache_key, '"legacy-etag"', json.dumps("# Legacy Double Encoded"))
+    mgr3 = ShowcaseManager(bot)  # type: ignore[arg-type]
+    await mgr3.refresh(sc_file, force=True)
+    assert file_calls[-1] is None
+    repaired = await db.get_http_cache(cache_key)
+    assert repaired == ('"f-2"', "<b>Fresh</b>")
