@@ -167,23 +167,33 @@ class GitHubClient:
         self._install_tokens[inst_id] = (data["token"], _parse_time(data["expires_at"]))
         return data["token"]
 
-    async def _auth_for(self, path: str) -> tuple[str, str | None]:
+    async def _auth_for(self, path: str, repo: tuple[str, str] | None = None) -> tuple[str, str | None]:
         """Pick (rate-limit bucket, Authorization header) for a request path."""
-        parts = path.split("/")
-        if self.app and len(parts) >= 4 and parts[1] == "repos":
-            inst_id = await self._installation_id(parts[2], parts[3])
-            if inst_id is not None:
-                return f"installation:{inst_id}", f"token {await self._installation_token(inst_id)}"
+        if self.app:
+            owner_name = repo
+            if owner_name is None:
+                parts = path.split("/")
+                if len(parts) >= 4 and parts[1] == "repos":
+                    owner_name = (parts[2], parts[3])
+            if owner_name is not None:
+                inst_id = await self._installation_id(*owner_name)
+                if inst_id is not None:
+                    return f"installation:{inst_id}", f"token {await self._installation_token(inst_id)}"
         if self.token:
             return "token", f"Bearer {self.token}"
         return "anonymous", None
 
-    def _forget_installation(self, path: str) -> None:
-        parts = path.split("/")
-        if len(parts) >= 4:
-            cached = self._installations.pop(f"{parts[2]}/{parts[3]}".lower(), None)
-            if cached and cached[0] is not None:
-                self._install_tokens.pop(cached[0], None)
+    def _forget_installation(self, path: str, repo: tuple[str, str] | None = None) -> None:
+        if repo is not None:
+            key = f"{repo[0]}/{repo[1]}".lower()
+        else:
+            parts = path.split("/")
+            if len(parts) < 4:
+                return
+            key = f"{parts[2]}/{parts[3]}".lower()
+        cached = self._installations.pop(key, None)
+        if cached and cached[0] is not None:
+            self._install_tokens.pop(cached[0], None)
 
     @property
     def rate_limited_until(self) -> float | None:
@@ -193,19 +203,21 @@ class GitHubClient:
 
     # ------------------------------------------------------------------ requests
     async def _get(self, path: str, params: dict[str, Any] | None = None,
-                   etag: str | None = None) -> tuple[int, Any, str | None]:
+                   etag: str | None = None, *,
+                   repo: tuple[str, str] | None = None) -> tuple[int, Any, str | None]:
         """GET a path. Returns (status, json, etag); status 304 means unchanged."""
-        return await self._request("GET", path, params=params, etag=etag)
+        return await self._request("GET", path, params=params, etag=etag, repo=repo)
 
     async def _request(self, method: str, path: str, *, params: dict[str, Any] | None = None,
-                       json: Any = None, etag: str | None = None) -> tuple[int, Any, str | None]:
-        bucket, auth = await self._auth_for(path)
+                       json: Any = None, etag: str | None = None,
+                       repo: tuple[str, str] | None = None) -> tuple[int, Any, str | None]:
+        bucket, auth = await self._auth_for(path, repo=repo)
         try:
             return await self._raw(method, path, bucket=bucket, auth=auth, params=params,
                                    json=json, etag=etag)
         except GitHubError as exc:
             if exc.status == 401 and bucket.startswith("installation:"):
-                self._forget_installation(path)  # app uninstalled or token revoked
+                self._forget_installation(path, repo=repo)  # app uninstalled or token revoked
             raise
 
     async def _raw(self, method: str, path: str, *, bucket: str, auth: str | None,
@@ -225,6 +237,8 @@ class GitHubClient:
             self._record_rate_limit(bucket, resp)
             if resp.status == 304:
                 return 304, None, etag
+            if resp.status == 204:
+                return 204, None, resp.headers.get("ETag")
             if resp.status == 404:
                 raise NotFound(f"Not found: {path}", 404)
             if resp.status in (403, 429) and (
@@ -291,9 +305,55 @@ class GitHubClient:
         await self._request("POST", f"/repos/{owner}/{name}/issues/{number}/comments",
                             json={"body": body})
 
+    async def list_issue_comments(self, owner: str, name: str, number: int,
+                                  etag: str | None = None) -> tuple[list[dict[str, Any]] | None, str | None]:
+        """List comments on an issue or PR. Returns ``(None, etag)`` when unchanged."""
+        status, data, new_etag = await self._get(
+            f"/repos/{owner}/{name}/issues/{number}/comments",
+            {"per_page": 100}, etag=etag,
+        )
+        return (None if status == 304 else data), new_etag
+
+    async def search_issues(self, owner: str, name: str, query: str, *,
+                            state: str = "all", kind: str = "all",
+                            per_page: int = 10) -> dict[str, Any]:
+        """Search issues and/or pull requests in a repository."""
+        parts = [f"repo:{owner}/{name}"]
+        if state in ("open", "closed"):
+            parts.append(f"is:{state}")
+        if kind == "issues":
+            parts.append("is:issue")
+        elif kind == "prs":
+            parts.append("is:pr")
+        if query.strip():
+            parts.append(query.strip())
+        _, data, _ = await self._get(
+            "/search/issues",
+            {"q": " ".join(parts), "per_page": min(max(per_page, 1), 25)},
+            repo=(owner, name),
+        )
+        return data
+
     async def list_labels(self, owner: str, name: str) -> list[dict[str, Any]]:
         _, data, _ = await self._get(f"/repos/{owner}/{name}/labels", {"per_page": 100})
         return data
+
+    async def add_issue_labels(self, owner: str, name: str, number: int,
+                               labels: list[str]) -> list[dict[str, Any]]:
+        _, data, _ = await self._request(
+            "POST", f"/repos/{owner}/{name}/issues/{number}/labels",
+            json={"labels": labels},
+        )
+        return data
+
+    async def remove_issue_label(self, owner: str, name: str, number: int, label: str) -> None:
+        try:
+            await self._request(
+                "DELETE",
+                f"/repos/{owner}/{name}/issues/{number}/labels/{quote(label, safe='')}",
+            )
+        except NotFound:
+            pass
 
     async def get_branch(self, owner: str, name: str, branch: str) -> dict[str, Any]:
         _, data, _ = await self._get(f"/repos/{owner}/{name}/branches/{quote(branch, safe='')}")
@@ -325,9 +385,35 @@ class GitHubClient:
                                          json=payload)
         return data
 
+    async def _create_orphan_branch(self, owner: str, name: str, branch: str) -> None:
+        """Create an orphan branch with a README so attachments don't copy repository history."""
+        readme = base64.b64encode(
+            b"# Discord Attachments\n\nMedia hosted for GitHub issues filed from Discord.\n"
+        ).decode("ascii")
+        _, blob, _ = await self._request(
+            "POST", f"/repos/{owner}/{name}/git/blobs",
+            json={"content": readme, "encoding": "base64"},
+        )
+        _, tree, _ = await self._request(
+            "POST", f"/repos/{owner}/{name}/git/trees",
+            json={"tree": [{
+                "path": "README.md", "mode": "100644", "type": "blob", "sha": blob["sha"],
+            }]},
+        )
+        _, commit, _ = await self._request(
+            "POST", f"/repos/{owner}/{name}/git/commits",
+            json={
+                "message": "Initialize discord-attachments branch",
+                "tree": tree["sha"],
+                "parents": [],
+            },
+        )
+        await self.create_ref(owner, name, f"refs/heads/{branch}", commit["sha"])
+
     async def upload_attachment(self, owner: str, name: str, default_branch: str,
-                                filename: str, content: bytes) -> str | None:
-        """Upload an attachment to a dedicated branch in the repository.
+                                filename: str, content: bytes, *,
+                                path_prefix: str = "attachments") -> str | None:
+        """Upload an attachment to a dedicated orphan branch in the repository.
 
         Returns the permanent raw content URL, or ``None`` on failure.
         """
@@ -345,9 +431,12 @@ class GitHubClient:
                     await self.get_ref(owner, name, f"heads/{branch}")
                     self._known_branches.add((repo_key, branch))
                 except NotFound:
-                    base_ref = await self.get_ref(owner, name, f"heads/{default_branch}")
-                    sha = base_ref["object"]["sha"]
-                    await self.create_ref(owner, name, f"refs/heads/{branch}", sha)
+                    try:
+                        await self._create_orphan_branch(owner, name, branch)
+                    except NotFound:
+                        base_ref = await self.get_ref(owner, name, f"heads/{default_branch}")
+                        sha = base_ref["object"]["sha"]
+                        await self.create_ref(owner, name, f"refs/heads/{branch}", sha)
                     self._known_branches.add((repo_key, branch))
             except Exception as exc:
                 log.warning("Couldn't ensure branch %s in %s/%s (%s); skipping GitHub upload",
@@ -357,7 +446,8 @@ class GitHubClient:
         clean_name = re.sub(r"[^\w.-]", "_", filename).lstrip(".")
         if not clean_name:
             clean_name = "attachment"
-        path = f"attachments/{int(time.time())}_{uuid.uuid4().hex[:8]}_{clean_name}"
+        prefix = path_prefix.strip("/") or "attachments"
+        path = f"{prefix}/{int(time.time())}_{uuid.uuid4().hex[:8]}_{clean_name}"
         commit_msg = f"Upload {clean_name} from Discord"
         try:
             data = await self.create_file(owner, name, path, content, commit_msg, branch=target_branch)
@@ -401,6 +491,9 @@ class GitHubClient:
         elif stream.startswith("commits:"):
             path = f"{base}/commits"
             params = {"sha": stream.split(":", 1)[1], "per_page": PER_PAGE}
+        elif stream == "workflows":
+            path = f"{base}/actions/runs"
+            params = {"status": "completed", "per_page": PER_PAGE}
         else:
             raise ValueError(f"unknown stream {stream!r}")
 
@@ -412,4 +505,7 @@ class GitHubClient:
         elif stream == "issues":
             # The issues endpoint also returns pull requests; those have their own stream.
             data = [i for i in data if "pull_request" not in i]
+        elif stream == "workflows":
+            runs = data.get("workflow_runs") or []
+            data = [r for r in runs if r.get("conclusion") in ("failure", "timed_out", "startup_failure")]
         return data, new_etag

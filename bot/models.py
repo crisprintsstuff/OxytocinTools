@@ -6,7 +6,7 @@ from urllib.parse import quote
 from dataclasses import dataclass
 from typing import Any
 
-EVENT_TYPES = ("releases", "commits", "issues", "pulls")
+EVENT_TYPES = ("releases", "commits", "issues", "pulls", "workflows")
 RELEASE_KINDS = ("all", "stable", "prerelease")
 
 @dataclass(frozen=True)
@@ -57,6 +57,7 @@ EVENT_LABELS = {
     "commits": "Commits",
     "issues": "New issues",
     "pulls": "Pull requests",
+    "workflows": "Workflow failures",
 }
 
 _REPO_RE = re.compile(
@@ -86,6 +87,8 @@ def stream_key(event_type: str, branch: str | None = None) -> str:
         return f"commits:{branch}"
     if event_type == "pulls":
         return "prs"
+    if event_type == "workflows":
+        return "workflows"
     return event_type
 
 
@@ -211,6 +214,12 @@ class Route:
                 return False
             base = (item.get("base") or {}).get("ref") or ""
             return pattern_matches(self.branch, base)
+        if self.event_type == "workflows":
+            if item.get("status") != "completed":
+                return False
+            if item.get("conclusion") not in ("failure", "timed_out", "startup_failure"):
+                return False
+            return pattern_matches(self.branch, item.get("head_branch") or "")
         return True
 
     def describe(self) -> str:
@@ -221,6 +230,8 @@ class Route:
             if self.tag_pattern:
                 parts.append(f"tags `{self.tag_pattern}`")
         if self.event_type == "commits":
+            parts.append(f"branch `{self.branch}`")
+        if self.event_type == "workflows" and self.branch:
             parts.append(f"branch `{self.branch}`")
         if self.event_type == "pulls":
             events = self.pr_event_set
@@ -327,6 +338,7 @@ class Filing:
     reply_message_id: int | None
     close_thread: bool
     state: str
+    last_comment_id: int = 0
 
     @property
     def full_name(self) -> str:
@@ -348,6 +360,7 @@ class PRTracker:
     threads: bool = True
     mention_role_id: int | None = None
     last_error: str | None = None
+    cleanup_days: int = 0
 
     @property
     def full_name(self) -> str:
@@ -373,6 +386,8 @@ class PRTracker:
             parts.append("no threads")
         if self.mention_role_id:
             parts.append(f"pings <@&{self.mention_role_id}>")
+        if self.cleanup_days > 0:
+            parts.append(f"cleans up after {self.cleanup_days}d")
         return ", ".join(parts)
 
 
@@ -386,3 +401,48 @@ class PRCard:
     state: str = "open"
     status_json: str | None = None
     card_hash: str | None = None
+    closed_at: float | None = None
+
+
+@dataclass
+class Digest:
+    id: int
+    repo_id: int
+    guild_id: int
+    owner: str
+    name: str
+    channel_id: int
+    kind: str                  # "changelog" | "reviews"
+    interval_days: int = 7
+    stale_days: int = 3
+    mention_role_id: int | None = None
+    last_sent_at: float | None = None
+    last_error: str | None = None
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.owner}/{self.name}"
+
+    def describe(self) -> str:
+        label = "Changelog" if self.kind == "changelog" else f"Review nudges (>{self.stale_days}d)"
+        parts = [f"**{self.full_name}** → <#{self.channel_id}>", label, f"every {self.interval_days}d"]
+        if self.mention_role_id:
+            parts.append(f"pings <@&{self.mention_role_id}>")
+        return ", ".join(parts)
+
+
+@dataclass
+class IssueTemplate:
+    id: int
+    repo_id: int
+    guild_id: int
+    owner: str
+    name: str
+    label: str
+    title_hint: str | None = None
+    placeholder: str | None = None
+    body: str | None = None
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.owner}/{self.name}"

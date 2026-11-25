@@ -129,6 +129,94 @@ def pull_embed(repo: str, pr: dict[str, Any]) -> discord.Embed:
     return embed
 
 
+def issue_detail_embed(repo: str, item: dict[str, Any], *, compact: bool = False) -> discord.Embed:
+    """Detailed (for /issue view) or compact (for #123 auto-preview) embed for an issue or PR."""
+    is_pr = "pull_request" in item
+    state = item.get("state") or "open"
+    merged = bool(item.get("merged_at") or (item.get("pull_request") or {}).get("merged_at"))
+    if is_pr:
+        if merged:
+            emoji, state_label, color = "🟣", "Merged PR", PURPLE
+        elif state == "closed":
+            emoji, state_label, color = "🔴", "Closed PR", RED
+        elif item.get("draft"):
+            emoji, state_label, color = "⚪", "Draft PR", GREY
+        else:
+            emoji, state_label, color = "🟢", "Open PR", GREEN
+    else:
+        if state == "closed" and item.get("state_reason") == "not_planned":
+            emoji, state_label, color = "⚪", "Closed (not planned)", GREY
+        elif state == "closed":
+            emoji, state_label, color = "🟣", "Closed", PURPLE
+        else:
+            emoji, state_label, color = "🟢", "Open", GREEN
+
+    title = truncate(f"{emoji} {repo}#{item['number']} {item['title']}", 256)
+    labels = [lbl["name"] for lbl in item.get("labels", []) if isinstance(lbl, dict)]
+    comments = item.get("comments") or 0
+
+    if compact:
+        snippet = truncate(item.get("body"), 220)
+        meta = [f"**{state_label}**"]
+        if labels:
+            meta.append(" ".join(f"`{truncate(n, 20)}`" for n in labels[:4]))
+        if comments:
+            meta.append(f"💬 {comments}")
+        parts = [snippet] if snippet else []
+        parts.append(" · ".join(meta))
+        embed = discord.Embed(
+            title=title,
+            url=item.get("html_url"),
+            description=truncate("\n".join(parts), 500),
+            color=color,
+            timestamp=_ts(item.get("created_at")),
+        )
+        _author(embed, item.get("user"))
+        return embed
+
+    embed = discord.Embed(
+        title=title,
+        url=item.get("html_url"),
+        description=truncate(item.get("body"), 1000) or "*No description.*",
+        color=color,
+        timestamp=_ts(item.get("created_at")),
+    )
+    _author(embed, item.get("user"))
+    embed.add_field(name="Status", value=state_label)
+    if labels:
+        embed.add_field(name="Labels", value=truncate(", ".join(labels), 1024))
+    assignees = [a["login"] for a in item.get("assignees") or [] if isinstance(a, dict) and a.get("login")]
+    if assignees:
+        embed.add_field(name="Assignees", value=truncate(", ".join(assignees), 1024))
+    embed.add_field(name="Comments", value=str(comments))
+    milestone = (item.get("milestone") or {}).get("title")
+    if milestone:
+        embed.add_field(name="Milestone", value=truncate(milestone, 256))
+    return embed
+
+
+def workflow_embed(repo: str, run: dict[str, Any]) -> discord.Embed:
+    name = run.get("name") or "Workflow"
+    number = run.get("run_number")
+    conclusion = (run.get("conclusion") or "failure").replace("_", " ")
+    branch = run.get("head_branch") or "?"
+    sha = (run.get("head_sha") or "")[:7]
+    head_msg = ((run.get("head_commit") or {}).get("message") or "").splitlines()
+    msg_line = truncate(head_msg[0], 100) if head_msg else ""
+    desc = f"Branch: `{branch}` · Event: `{run.get('event') or 'push'}` · Result: **{conclusion}**"
+    if sha:
+        desc += f"\nCommit: `{sha}`" + (f" — {msg_line}" if msg_line else "")
+    embed = discord.Embed(
+        title=truncate(f"❌ [{repo}] {name}" + (f" #{number}" if number else "") + f" ({conclusion})", 256),
+        url=run.get("html_url"),
+        description=truncate(desc, 1000),
+        color=RED,
+        timestamp=_ts(run.get("updated_at") or run.get("created_at")),
+    )
+    _author(embed, run.get("triggering_actor") or run.get("actor"))
+    return embed
+
+
 def build_embeds(repo: str, stream: str, items: list[dict[str, Any]]) -> list[discord.Embed]:
     """Turn new items of a feed into the embeds to post (one message per embed)."""
     if stream.startswith("commits:"):
@@ -139,4 +227,6 @@ def build_embeds(repo: str, stream: str, items: list[dict[str, Any]]) -> list[di
         return [issue_embed(repo, i) for i in items]
     if stream in ("prs", "pulls"):
         return [pull_embed(repo, i) for i in items]
+    if stream == "workflows":
+        return [workflow_embed(repo, i) for i in items]
     raise ValueError(stream)

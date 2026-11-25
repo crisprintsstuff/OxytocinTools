@@ -61,6 +61,7 @@ later. No per-repo invites are needed. Issues it creates show as opened by
      | Pull requests | Read-only |
      | Checks | Read-only (CI results on PR cards) |
      | Commit statuses | Read-only (CI results on PR cards) |
+     | Actions | Read-only (workflow failure alerts) |
      | Metadata | Read-only (selected automatically) |
    - **Where can this GitHub App be installed?** **Only on this account**.
 3. Click **Create GitHub App**. On the next page:
@@ -127,6 +128,11 @@ application.
 | `DATABASE_PATH` | `data/tracker.db` | SQLite file location                                |
 | `CONFIG_BACKUP_PATH` | `data/config-backup.json` | Portable JSON mirror of server config (`off` to disable) |
 | `DB_BACKUP_COUNT` | `7`             | Rolling SQLite backups to keep in `data/backups/` (`0` to disable) |
+| `MEDIA_REPO`    | *(none)*          | Optional public `owner/name` repo to host Discord attachments |
+| `WEBHOOK_PORT`  | `0`               | Optional HTTP port for GitHub webhooks (`0` = disabled) |
+| `WEBHOOK_HOST`  | `127.0.0.1`       | Bind address for the webhook server                 |
+| `WEBHOOK_PATH`  | `/webhook`        | URL path for GitHub webhook POSTs                   |
+| `WEBHOOK_SECRET`| *(none)*          | HMAC secret (`X-Hub-Signature-256`) for webhooks    |
 | `BOT_OWNER_IDS` | *(none)*          | Comma-separated user IDs with admin rights everywhere |
 | `ISSUE_COOLDOWN`| `60`              | Seconds between issues per non-admin user (0 = off) |
 | `LOG_LEVEL`     | `INFO`            | Python log level                                    |
@@ -158,7 +164,7 @@ A repo can have any number of routes.
 | 🔒 `/route remove <route>` | Delete a route. |
 | 🔒 `/route test <route>` | Post the most recent matching item, to check formatting and permissions. |
 
-**Events:** `Releases`, `Commits` (per branch), `New issues`, `Pull requests`.
+**Events:** `Releases`, `Commits` (per branch), `New issues`, `Pull requests`, `Workflow failures`.
 
 **Release filters**
 - `release_kind`: `All releases` / `Stable releases only` / `Pre-releases only`
@@ -187,7 +193,12 @@ two checks gets both posts, and PRs merged before a route existed are never anno
 ### Issues — `/issue` and the message menu
 | Command | Description |
 |---|---|
-| `/issue create <repo>` | Opens a form (title, description, labels) and creates the issue on GitHub. |
+| `/issue create <repo> [label]` | Opens a form (title, description, labels) and creates the issue on GitHub (uses any matching custom template). |
+| `/issue view <repo> <number>` | Show details and current status of an issue or pull request. |
+| `/issue search <repo> <query> [state] [type]` | Search issues and pull requests in a repository. |
+| 🔒 `/issue template-set <repo> [label]` | Configure custom form title, placeholder, and pre-filled body for a repo or label. |
+| 🔒 `/issue template-list [repo]` | List configured issue form templates. |
+| 🔒 `/issue template-remove <repo> [label]` | Remove an issue form template. |
 | Right-click a message → **Apps → Create GitHub issue** | Turns a chat message into an issue. The form is pre-filled with the message, and the issue links back to it and lists its attachments. If you can file in several repos, you pick one first. |
 
 Who can use these is set per server, and can be overridden per repo:
@@ -205,6 +216,7 @@ Safeguards:
 - `@mentions` in text written by non-admins are defused, so Discord users can't ping
   GitHub users or teams through the bot.
 - Every issue ends with "Reported from Discord by **name** (`username`) in **server** #channel".
+- When filing via `/issue create` or a watch, the bot checks for similar open issues and lists any matches in its confirmation embed.
 
 Issues can only be created in repos where the GitHub App is installed. If GitHub doesn't
 apply some of the labels someone typed, the confirmation message says which ones.
@@ -226,14 +238,19 @@ The reporter is credited, and the usual issue-access rules and cooldown apply.
   to the message are included.
 - **Pictures, videos, and files** attached to the message or reply are included. Images are
   rendered inline directly in the GitHub issue. When the GitHub App has *Contents: Read and write*
-  permission, attachments are automatically re-hosted on a `discord-attachments` branch so they
-  never expire.
+  permission, attachments are automatically re-hosted on an orphan `discord-attachments` branch
+  (or a dedicated repo set via `/admin media-repo` / `MEDIA_REPO`) so they never expire.
 - **Reply** to someone's message with the mention to file *their* message: they're the
   reporter, you're credited as the person who filed it, attachments from both messages are
   included, and anything else you wrote is added as a note.
 - The bot replies with a link to the issue, an **Open on GitHub** button and a **Not an issue**
-  button, and reacts ✅. Pressing **Not an issue** (the reporter, the person who filed it, or
-  an admin) closes the issue on GitHub as *not planned* and leaves a comment saying who did it.
+  button, plus admin-only triage buttons (**Complete**, **Labels**, **Comment**), and reacts ✅.
+  Pressing **Not an issue** (the reporter, the person who filed it, or an admin) closes the issue
+  on GitHub as *not planned* and leaves a comment saying who did it.
+- **Two-way updates:** When the issue closes on GitHub, the bot updates its reply embed and pings
+  the reporter. Replying to the bot's `"Filed as #..."` message adds a comment on GitHub (reacts 💬).
+- **Auto-preview `#123`:** Mentioning `#123` or `repo#123` in chat posts a compact preview embed for
+  tracked repos (toggleable via `/admin autolink`).
 - A bare mention with no text or attachments is ignored, and editing a message never files it again.
 - If someone isn't allowed to file in that repo (see `/admin issue-access`) or is on cooldown,
   the bot replies with the reason and deletes the reply after 30 seconds.
@@ -249,6 +266,8 @@ they work as triggers and notify nobody.
   forum tags *Bug* and *Enhancement* map to the `bug` and `enhancement` labels. Tags without a
   matching label are skipped.
 - The bot replies in the post with the issue link and the **Not an issue** button.
+- **Two-way comment sync:** Follow-up messages in the post are posted as GitHub comments (reacts 💬),
+  and new GitHub comments are mirrored back into the post (toggleable via `/admin comment-sync`).
 - With `close_posts` on (the default), when the issue is closed on GitHub the bot posts a note
   in the thread, then closes and locks it. If the issue was *completed* and the forum has a tag
   named **Solved** (or Resolved, Fixed, Done), that tag is added too. This needs **Manage Threads**.
@@ -259,12 +278,12 @@ One live card per open pull request, kept up to date, with a thread logging ever
 
 | Command | Description |
 |---|---|
-| 🔒 `/pr track <repo> <channel> [branch] [include_drafts] [include_bots] [threads] [mention]` | Post a card for each open PR in `channel`, and one for each new PR as it opens. |
-| 🔒 `/pr edit <tracker> [...]` | Update a PR card tracker's channel, branch filter, thread mode, or mention role. |
+| 🔒 `/pr track <repo> <channel> [branch] [include_drafts] [include_bots] [threads] [mention] [cleanup_days]` | Post a card for each open PR in `channel`, and one for each new PR as it opens. |
+| 🔒 `/pr edit <tracker> [...]` | Update a PR card tracker's channel, branch filter, thread mode, cleanup days, or mention role. |
 | 🔒 `/pr list` | Show trackers, how many open PRs each has, and any errors. |
 | 🔒 `/pr stop <tracker>` | Stop updating the cards. The cards stay where they are. |
 
-Each card shows:
+Each card has **Open PR**, **Checks**, **Files**, and **Refresh** (for open PRs) buttons, and shows:
 - **State:** 🟢 open, ⚪ draft, 🟣 merged, 🔴 closed (with the matching color)
 - The author, branches, and when it was opened, merged or closed
 - **Checks:** passed, failed (with the failing checks' names) and still running
@@ -340,6 +359,14 @@ They have **Refresh** and **View on GitHub** buttons (no Report button). They sh
 data with PR cards (`/pr track`), so using both costs hardly any extra requests. CI icons need
 the GitHub App's **Checks** and **Commit statuses** permissions.
 
+### Digests — `/digest`
+| Command | Description |
+|---|---|
+| 🔒 `/digest add <repo> <channel> <type> [interval_days] [stale_days] [mention]` | Schedule a periodic **Changelog** (merged PRs & closed issues) or **Review nudges** (PRs waiting `>stale_days` for review) summary. |
+| 🔒 `/digest list` | List scheduled digests and any errors. |
+| 🔒 `/digest remove <digest>` | Remove a scheduled digest. |
+| 🔒 `/digest run <digest>` | Post a digest immediately. |
+
 ### Administration — `/admin`
 | Command | Description |
 |---|---|
@@ -352,6 +379,10 @@ the GitHub App's **Checks** and **Commit statuses** permissions.
 | 🔒 `/admin export` | Download this server's configuration as a JSON file. |
 | 🔒 `/admin import <file>` | Restore server configuration from a JSON export (existing items are kept). |
 | 🔒 `/admin sync` | Force-sync global slash commands with Discord. |
+| 🔒 `/admin autolink <enabled>` | Toggle automatic `#123` issue/PR preview embeds in chat. |
+| 🔒 `/admin comment-sync <enabled>` | Toggle two-way comment syncing for filed issues. |
+| 🔒 `/admin media-repo [repo]` | Set or clear a dedicated repository for hosting Discord attachments. |
+| 🔒 `/admin alerts [channel]` | Set a private staff channel for deduplicated error alerts (empty to disable). |
 
 ## Example: routing releases
 
@@ -429,6 +460,7 @@ its filters, oldest first.
 - **SQLite durability & rolling backups:** The database runs in WAL mode with `busy_timeout`, checkpoints passively after each poll cycle, truncates on clean shutdown, and writes rolling online backups to `data/backups/` on startup and once every 24 hours (`DB_BACKUP_COUNT`, default `7`).
 - **Config mirror & auto-restore:** Every configuration change is atomically mirrored to `data/config-backup.json` (`CONFIG_BACKUP_PATH`). If the bot starts with an empty database and that file exists, it automatically restores your servers, repos, routes, dashboards, watches, and PR trackers. You can also use `/admin export` and `/admin import` at any time.
 - **Slash command sync:** Global slash commands are only synced with Discord when the command schema actually changes (tracked via `commands_hash` in SQLite), or on demand via `/admin sync`.
+- **Persistent ETag cache & optional webhooks:** Dashboard and PR card GitHub ETags are cached in SQLite (`http_cache`) so restarts don't trigger a fresh burst of API usage. Set `WEBHOOK_PORT` (and `WEBHOOK_SECRET`) to accept GitHub webhooks for near-instant poll triggers alongside the regular polling fallback.
 
 <details>
 <summary>Example systemd service (Linux)</summary>

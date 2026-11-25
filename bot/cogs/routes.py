@@ -46,8 +46,7 @@ class Routes(commands.GroupCog, group_name="route",
         event="What to post",
         release_kind="Releases only: stable, pre-releases, or both",
         tag_pattern="Releases only: tag filter, e.g. v2.* (glob) or re:^v\\d+\\.\\d+\\.\\d+$ (regex)",
-        branch="Commits: branch to watch (default: the repo's default branch). "
-               "Pull requests: only PRs into this branch, e.g. main",
+        branch="Commits: branch. Pulls/Workflows: base/head branch filter",
         mention="Role to ping with each post",
         publish="Auto-publish posts when the channel is an announcement channel",
         pr_events="Pull requests only: which events to post (default: opened, ready)",
@@ -69,8 +68,8 @@ class Routes(commands.GroupCog, group_name="route",
 
         if event_type != "releases" and (release_kind or tag_pattern):
             raise UserError("`release_kind` and `tag_pattern` only apply to release routes.")
-        if event_type not in ("commits", "pulls") and branch:
-            raise UserError("`branch` only applies to commit and pull request routes.")
+        if event_type not in ("commits", "pulls", "workflows") and branch:
+            raise UserError("`branch` only applies to commit, pull request, and workflow routes.")
         if event_type != "pulls" and (pr_events or include_drafts is not None
                                       or include_bots is not None):
             raise UserError("`pr_events`, `include_drafts` and `include_bots` only apply to "
@@ -81,11 +80,11 @@ class Routes(commands.GroupCog, group_name="route",
             except ValueError as exc:
                 raise UserError(str(exc)) from exc
             pr_events = ",".join(events)
-            if branch:
-                try:
-                    validate_pattern(branch)
-                except ValueError as exc:
-                    raise UserError(str(exc)) from exc
+        if event_type in ("pulls", "workflows") and branch:
+            try:
+                validate_pattern(branch)
+            except ValueError as exc:
+                raise UserError(str(exc)) from exc
         if tag_pattern:
             try:
                 validate_pattern(tag_pattern)
@@ -155,7 +154,7 @@ class Routes(commands.GroupCog, group_name="route",
         channel="New channel to post in",
         release_kind="Releases only: stable, pre-releases, or both",
         tag_pattern="Releases only: glob or re:... filter (or 'none' to clear)",
-        branch="Commits: branch name. PRs: base branch filter (or 'none' to clear)",
+        branch="Commits: branch. Pulls/Workflows: branch filter ('none' to clear)",
         mention="Role to ping with each post",
         clear_mention="Remove the mention role",
         publish="Auto-publish posts in an announcement channel",
@@ -179,8 +178,8 @@ class Routes(commands.GroupCog, group_name="route",
         route = await self._get(interaction, route_id)
         if route.event_type != "releases" and (release_kind or tag_pattern is not None):
             raise UserError("`release_kind` and `tag_pattern` only apply to release routes.")
-        if route.event_type not in ("commits", "pulls") and branch is not None:
-            raise UserError("`branch` only applies to commit and pull request routes.")
+        if route.event_type not in ("commits", "pulls", "workflows") and branch is not None:
+            raise UserError("`branch` only applies to commit, pull request, and workflow routes.")
         if route.event_type != "pulls" and (
             pr_events is not None or include_drafts is not None or include_bots is not None
         ):

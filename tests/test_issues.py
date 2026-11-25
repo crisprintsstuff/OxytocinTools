@@ -53,7 +53,12 @@ async def test_migrates_old_database(tmp_path):
     db = await Database.open(path)
     assert await db.get_admin_role(1) == 42
     assert await db.get_issue_settings(1) == ("admins", None)
+    assert await db.get_autolink_enabled(1) is True
+    assert await db.get_comment_sync_enabled(1) is True
     assert (await db.get_repo(1, "o", "r")).issue_access is None
+    async with db.conn.execute("PRAGMA table_info(filings)") as cur:
+        cols = {row[1] for row in await cur.fetchall()}
+    assert "last_comment_id" in cols
     await db.close()
 
 
@@ -197,3 +202,29 @@ def test_issue_form_matches_label():
     assert IssueModal(None, repo, labels="enhancement").title == "Feature request: o/r"
     assert IssueModal(None, repo, labels="bug").body.placeholder.startswith("What happened")
     assert IssueModal(None, repo).title == "New issue: o/r"
+
+
+def test_issue_detail_embed_variants():
+    from bot.embeds import GREY, PURPLE, RED, issue_detail_embed
+
+    open_issue = {
+        "number": 12, "title": "Crash on load", "state": "open",
+        "html_url": "https://github.com/o/r/issues/12", "body": "Stack trace here",
+        "labels": [{"name": "bug"}], "comments": 3, "assignees": [{"login": "cris"}],
+        "user": {"login": "alice"}, "created_at": "2026-11-20T10:00:00Z",
+    }
+    full = issue_detail_embed("o/r", open_issue)
+    assert full.title.startswith("🟢 o/r#12")
+    assert {f.name: f.value for f in full.fields}["Status"] == "Open"
+    compact = issue_detail_embed("o/r", open_issue, compact=True)
+    assert "`bug`" in compact.description and "💬 3" in compact.description
+
+    not_planned = {**open_issue, "state": "closed", "state_reason": "not_planned"}
+    assert issue_detail_embed("o/r", not_planned).color == GREY
+
+    merged_pr = {**open_issue, "state": "closed", "pull_request": {"merged_at": "2026-11-21T10:00:00Z"}}
+    assert issue_detail_embed("o/r", merged_pr).color == PURPLE
+    closed_pr = {**open_issue, "state": "closed", "pull_request": {"merged_at": None}}
+    assert issue_detail_embed("o/r", closed_pr).color == RED
+    draft_pr = {**open_issue, "state": "open", "draft": True, "pull_request": {}}
+    assert issue_detail_embed("o/r", draft_pr).title.startswith("⚪")

@@ -74,7 +74,9 @@ async def test_mention_files_issue(db):
 
     reply = msg.reply.call_args.kwargs
     assert reply["embed"].title == "📝 Filed as crisprintsstuff/OxyBrush#42"
-    assert [getattr(c, "item", c).label for c in reply["view"].children] == ["Open on GitHub", "Not an issue"]
+    assert [getattr(c, "item", c).label for c in reply["view"].children] == [
+        "Open on GitHub", "Not an issue", "Complete", "Labels", "Comment"
+    ]
     msg.add_reaction.assert_awaited_with("✅")
     filing = await db.find_filing(1, repo.id)
     assert filing.issue_number == 42 and filing.reporter_id == filing.filer_id == 5

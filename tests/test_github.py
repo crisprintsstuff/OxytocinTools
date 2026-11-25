@@ -70,6 +70,21 @@ async def aiohttp_server_factory():
     app.router.add_get("/repos/o/r/git/ref/{ref:.+}", git_ref)
     app.router.add_post("/repos/o/r/git/refs", create_git_ref)
     app.router.add_put("/repos/o/r/contents/{path:.+}", put_content)
+
+    async def issue_comments(request):
+        headers = {"ETag": '"c1"'}
+        if request.headers.get("If-None-Match") == '"c1"':
+            return web.Response(status=304, headers=headers)
+        return web.json_response([{"id": 10, "body": "First comment"}], headers=headers)
+
+    async def search_issues(request):
+        return web.json_response({
+            "total_count": 1,
+            "items": [{"number": 5, "title": request.query.get("q", ""), "state": "open"}],
+        })
+
+    app.router.add_get("/repos/o/r/issues/7/comments", issue_comments)
+    app.router.add_get("/search/issues", search_issues)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -148,3 +163,13 @@ async def test_upload_attachment_does_not_fallback_to_default_branch(aiohttp_ser
     finally:
         await client.close()
         await runner.cleanup()
+
+
+async def test_list_issue_comments_and_search(gh):
+    comments, etag = await gh.list_issue_comments("o", "r", 7)
+    assert comments == [{"id": 10, "body": "First comment"}] and etag == '"c1"'
+    assert await gh.list_issue_comments("o", "r", 7, etag) == (None, '"c1"')
+
+    res = await gh.search_issues("o", "r", "crash", state="open", kind="issues")
+    assert res["total_count"] == 1
+    assert res["items"][0]["title"] == "repo:o/r is:open is:issue crash"

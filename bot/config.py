@@ -31,6 +31,11 @@ class Config:
     database_path: str = "data/tracker.db"
     config_backup_path: str | None = None
     backup_count: int = 7
+    media_repo: str | None = None
+    webhook_host: str = "127.0.0.1"
+    webhook_port: int = 0
+    webhook_secret: str | None = None
+    webhook_path: str = "/webhook"
     owner_ids: set[int] = field(default_factory=set)
     dev_guild_id: int | None = None
     log_level: str = "INFO"
@@ -76,6 +81,9 @@ class Config:
         else:
             config_backup_path = None
         backup_count = max(0, int(os.getenv("DB_BACKUP_COUNT", "7") or 7))
+        webhook_path = os.getenv("WEBHOOK_PATH", "/webhook").strip() or "/webhook"
+        if not webhook_path.startswith("/"):
+            webhook_path = "/" + webhook_path
         return cls(
             discord_token=token,
             github_token=os.getenv("GITHUB_TOKEN", "").strip() or None,
@@ -85,6 +93,11 @@ class Config:
             database_path=database_path,
             config_backup_path=config_backup_path,
             backup_count=backup_count,
+            media_repo=os.getenv("MEDIA_REPO", "").strip() or None,
+            webhook_host=os.getenv("WEBHOOK_HOST", "127.0.0.1").strip() or "127.0.0.1",
+            webhook_port=max(0, int(os.getenv("WEBHOOK_PORT", "0") or 0)),
+            webhook_secret=os.getenv("WEBHOOK_SECRET", "").strip() or None,
+            webhook_path=webhook_path,
             owner_ids=_int_list(os.getenv("BOT_OWNER_IDS")),
             dev_guild_id=int(dev_guild) if dev_guild else None,
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),

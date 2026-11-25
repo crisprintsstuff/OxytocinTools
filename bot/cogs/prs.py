@@ -45,13 +45,15 @@ class PullRequests(commands.GroupCog, group_name="pr",
         include_bots="Also make cards for PRs from bots like Dependabot (default: no)",
         threads="Open a thread under each card with a line for every change (default: yes)",
         mention="Role to ping when a new card is posted",
+        cleanup_days="Delete merged/closed PR cards after N days (0 = keep forever)",
     )
     @app_commands.autocomplete(repo=repo_autocomplete)
     @bot_admin()
     async def track(self, interaction: discord.Interaction, repo: str, channel: discord.TextChannel,
                     branch: str | None = None, include_drafts: bool = False,
                     include_bots: bool = False, threads: bool = True,
-                    mention: discord.Role | None = None) -> None:
+                    mention: discord.Role | None = None,
+                    cleanup_days: app_commands.Range[int, 0, 365] = 0) -> None:
         assert interaction.guild is not None
         tracked = await resolve_tracked_repo(interaction, repo)
         branch = branch.strip() if branch else None
@@ -78,7 +80,8 @@ class PullRequests(commands.GroupCog, group_name="pr",
         tracker = await self.bot.db.add_pr_tracker(
             tracked, channel.id, branch=branch, include_drafts=include_drafts,
             include_bots=include_bots, threads=threads,
-            mention_role_id=mention.id if mention else None, created_by=interaction.user.id)
+            mention_role_id=mention.id if mention else None, created_by=interaction.user.id,
+            cleanup_days=cleanup_days)
         await self.bot.prcards.sync(tracker)
         cards = await self.bot.db.list_pr_cards(tracker.id)
         tracker = await self.bot.db.get_pr_tracker(tracker.id) or tracker
@@ -126,6 +129,7 @@ class PullRequests(commands.GroupCog, group_name="pr",
         threads="Open a timeline thread under each card",
         mention="Role to ping when a new card is posted",
         clear_mention="Remove the mention role",
+        cleanup_days="Delete merged/closed PR cards after N days (0 = keep forever)",
     )
     @app_commands.autocomplete(tracker=_tracker_autocomplete)
     @bot_admin()
@@ -134,7 +138,8 @@ class PullRequests(commands.GroupCog, group_name="pr",
                    branch: str | None = None, clear_branch: bool = False,
                    include_drafts: bool | None = None, include_bots: bool | None = None,
                    threads: bool | None = None, mention: discord.Role | None = None,
-                   clear_mention: bool = False) -> None:
+                   clear_mention: bool = False,
+                   cleanup_days: app_commands.Range[int, 0, 365] | None = None) -> None:
         assert interaction.guild is not None
         found = await self.bot.db.get_pr_tracker(tracker, interaction.guild.id)
         if found is None:
@@ -178,11 +183,14 @@ class PullRequests(commands.GroupCog, group_name="pr",
         new_bots = found.include_bots if include_bots is None else include_bots
         new_mention_id = None if clear_mention else (mention.id if mention else found.mention_role_id)
 
+        new_cleanup = found.cleanup_days if cleanup_days is None else cleanup_days
+
         updated = await self.bot.db.update_pr_tracker(
             found.id, interaction.guild.id,
             channel_id=new_channel_id, branch=new_branch,
             include_drafts=new_drafts, include_bots=new_bots,
             threads=new_threads, mention_role_id=new_mention_id,
+            cleanup_days=new_cleanup,
         )
         assert updated is not None
         await interaction.response.send_message(

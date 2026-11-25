@@ -55,6 +55,10 @@ async def test_export_import_and_auto_snapshot(tmp_path):
     await db.set_admin_role(100, 200)
     await db.set_issue_access(100, "role")
     await db.set_issue_role(100, 300)
+    await db.set_autolink_enabled(100, False)
+    await db.set_comment_sync_enabled(100, False)
+    await db.set_media_repo(100, "Org/Media")
+    await db.set_alert_channel(100, 99)
     repo = await db.add_repo(100, "Org", "App", "main", 1)
     await db.set_repo_issue_access(repo.id, "everyone")
     route = await db.add_route(repo, 11, "releases", release_kind="stable", tag_pattern="v*")
@@ -64,7 +68,11 @@ async def test_export_import_and_auto_snapshot(tmp_path):
     await db.add_watch(repo, "role", role_id=400, channel_id=13, label="bug")
     await db.add_watch(repo, "forum", channel_id=14, label="triage", close_threads=False)
     await db.add_pr_tracker(repo, 15, branch="main", include_drafts=True, include_bots=False,
-                            threads=True, mention_role_id=500, created_by=1)
+                            threads=True, mention_role_id=500, created_by=1, cleanup_days=14)
+    await db.set_issue_template(repo, "bug", title_hint="Bug Report",
+                                placeholder="OS + steps", body="## Steps\n1. ")
+    await db.add_digest(repo, 16, "changelog", interval_days=7, stale_days=3,
+                        mention_role_id=600, created_by=1)
 
     assert os.path.exists(snap_path)
     exported = json.loads((tmp_path / "config-backup.json").read_text(encoding="utf-8"))
@@ -77,10 +85,14 @@ async def test_export_import_and_auto_snapshot(tmp_path):
     counts = await db2.load_config_snapshot(snap_path)
     assert counts == {
         "guilds": 1, "repos": 1, "routes": 1,
-        "dashboards": 1, "watches": 2, "pr_trackers": 1,
+        "dashboards": 1, "watches": 2, "pr_trackers": 1, "templates": 1, "digests": 1,
     }
     assert await db2.get_admin_role(100) == 200
     assert await db2.get_issue_settings(100) == ("role", 300)
+    assert await db2.get_autolink_enabled(100) is False
+    assert await db2.get_comment_sync_enabled(100) is False
+    assert await db2.get_media_repo(100) == "Org/Media"
+    assert await db2.get_alert_channel(100) == 99
     restored_repo = await db2.get_repo(100, "org", "app")
     assert restored_repo is not None and restored_repo.issue_access == "everyone"
     (r2,) = await db2.list_routes(100)
@@ -89,13 +101,19 @@ async def test_export_import_and_auto_snapshot(tmp_path):
     assert (d2.channel_id, d2.message_id, d2.label, d2.pinned) == (12, 999, "bug", True)
     assert len(await db2.list_watches(100)) == 2
     (t2,) = await db2.list_pr_trackers(100)
-    assert (t2.channel_id, t2.branch, t2.include_drafts, t2.mention_role_id) == (15, "main", True, 500)
+    assert (t2.channel_id, t2.branch, t2.include_drafts, t2.mention_role_id, t2.cleanup_days) == (
+        15, "main", True, 500, 14
+    )
+    tpl = await db2.get_issue_template(restored_repo.id, "bug")
+    assert tpl is not None and tpl.title_hint == "Bug Report" and tpl.body == "## Steps\n1. "
+    (dg2,) = await db2.list_digests(100)
+    assert (dg2.channel_id, dg2.kind, dg2.interval_days, dg2.mention_role_id) == (16, "changelog", 7, 600)
 
     # Importing again is idempotent (no duplicates created)
     counts_again = await db2.import_config(exported, guild_id=100)
     assert counts_again == {
         "guilds": 1, "repos": 0, "routes": 0,
-        "dashboards": 0, "watches": 0, "pr_trackers": 0,
+        "dashboards": 0, "watches": 0, "pr_trackers": 0, "templates": 0, "digests": 0,
     }
     with pytest.raises(ValueError, match="does not contain"):
         await db2.import_config(exported, guild_id=999)

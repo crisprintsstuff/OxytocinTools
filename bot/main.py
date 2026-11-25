@@ -16,17 +16,27 @@ from .checks import NotBotAdmin, UserError
 from .config import Config
 from .dashboards import DashboardManager, RefreshButton, ReportButton
 from .db import Database
-from .prcards import PRCardManager
-from .watches import CloseFiledButton, WatchManager
-from .embeds import build_embeds
+from .digests import DigestManager
+from .embeds import ORANGE, build_embeds, truncate
 from .github import GitHubClient, GitHubError
 from .models import Route
 from .poller import Poller
+from .prcards import PRCardManager, RefreshPRCardButton
+from .watches import (
+    CloseFiledButton,
+    CommentFiledButton,
+    CompleteFiledButton,
+    LabelFiledButton,
+    WatchManager,
+)
+from .webhook import WebhookServer
 
 log = logging.getLogger("bot")
 
+ALERT_COOLDOWN = 6 * 3600
+
 EXTENSIONS = ("bot.cogs.repos", "bot.cogs.routes", "bot.cogs.admin", "bot.cogs.issues",
-              "bot.cogs.dashboards", "bot.cogs.watches", "bot.cogs.prs")
+              "bot.cogs.dashboards", "bot.cogs.watches", "bot.cogs.prs", "bot.cogs.digests")
 
 
 class TrackerBot(commands.Bot):
@@ -36,6 +46,8 @@ class TrackerBot(commands.Bot):
     dashboards: DashboardManager
     watches: WatchManager
     prcards: PRCardManager
+    digests: DigestManager
+    webhook: WebhookServer | None
 
     def __init__(self, config: Config, *, message_content: bool = True):
         intents = discord.Intents.default()
@@ -46,6 +58,8 @@ class TrackerBot(commands.Bot):
         self.config = config
         self._cleaned_guild_commands = False
         self._last_db_backup: float = 0.0
+        self._alert_sent: dict[tuple[int, str], float] = {}
+        self.webhook = None
 
     def _active_guild_ids(self) -> set[int] | None:
         return {g.id for g in self.guilds} if self.is_ready() else None
@@ -106,14 +120,18 @@ class TrackerBot(commands.Bot):
         self.dashboards = DashboardManager(self)
         self.watches = WatchManager(self)
         self.prcards = PRCardManager(self)
+        self.digests = DigestManager(self)
         self.poller = Poller(self.db, self.github, self.deliver,
                              interval=self.config.poll_interval,
                              wait_until_ready=self.wait_until_ready,
                              after_cycle=self.after_poll,
                              release_notes_wait=self.config.release_notes_wait * 60,
                              active_guilds=self._active_guild_ids)
-        # Dashboard buttons keep working after restarts: their IDs encode the dashboard.
-        self.add_dynamic_items(ReportButton, RefreshButton, CloseFiledButton)
+        # Dashboard, filing & PR card buttons keep working after restarts.
+        self.add_dynamic_items(
+            ReportButton, RefreshButton, RefreshPRCardButton,
+            CloseFiledButton, CompleteFiledButton, LabelFiledButton, CommentFiledButton,
+        )
         for ext in EXTENSIONS:
             await self.load_extension(ext)
         self.tree.on_error = self.on_app_command_error
@@ -127,8 +145,19 @@ class TrackerBot(commands.Bot):
             log.warning("No GitHub App or GITHUB_TOKEN configured: public repos only, "
                         "60 requests/hour, and issues can't be created")
         self.poller.start()
+        if self.config.webhook_port > 0:
+            self.webhook = WebhookServer(
+                host=self.config.webhook_host,
+                port=self.config.webhook_port,
+                on_trigger=self.poller.trigger,
+                secret=self.config.webhook_secret,
+                path=self.config.webhook_path,
+            )
+            await self.webhook.start()
 
     async def close(self) -> None:
+        if getattr(self, "webhook", None):
+            await self.webhook.stop()  # type: ignore[union-attr]
         if hasattr(self, "poller"):
             await self.poller.stop()
         if hasattr(self, "github"):
@@ -171,8 +200,41 @@ class TrackerBot(commands.Bot):
         removed += await self.db.remove_dashboards_for_channel(channel.id)
         removed += await self.db.remove_watches_for_channel(channel.id)
         removed += await self.db.remove_pr_trackers_for_channel(channel.id)
+        removed += await self.db.remove_digests_for_channel(channel.id)
+        if getattr(channel, "guild", None) and await self.db.get_alert_channel(channel.guild.id) == channel.id:
+            await self.db.set_alert_channel(channel.guild.id, None)
+            removed += 1
         if removed:
             log.info("Channel %s deleted; removed %d route(s)/dashboard(s)", channel.id, removed)
+
+    async def send_alert(self, guild_id: int, key: str, title: str, detail: str) -> bool:
+        """Post a deduplicated error alert to the server's configured alert channel."""
+        now = time.monotonic()
+        last = self._alert_sent.get((guild_id, key))
+        if last is not None and now - last < ALERT_COOLDOWN:
+            return False
+        channel_id = await self.db.get_alert_channel(guild_id)
+        if not channel_id:
+            return False
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(channel_id)
+            except discord.HTTPException:
+                return False
+        if channel is None or not hasattr(channel, "send"):
+            return False
+        embed = discord.Embed(
+            title=truncate(f"⚠️ {title}", 256),
+            description=truncate(detail, 1500),
+            color=ORANGE,
+        )
+        try:
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            return False
+        self._alert_sent[(guild_id, key)] = now
+        return True
 
     async def after_poll(self) -> None:
         self.prcards.begin_cycle()  # PR dashboards and PR cards share one response cache
@@ -180,8 +242,10 @@ class TrackerBot(commands.Bot):
             await self.dashboards.refresh_all()
             await self.watches.sync_threads()
             await self.prcards.update_all()
+            await self.digests.run_due()
         finally:
             self.prcards.end_cycle()
+        await self.db.prune_http_cache()
         await self.db.checkpoint("PASSIVE")
         if (self.config.backup_count > 0 and self.config.database_path != ":memory:"
                 and time.time() - self._last_db_backup >= 86400):
@@ -243,6 +307,12 @@ class TrackerBot(commands.Bot):
     async def _disable_route(self, route: Route, reason: str) -> None:
         log.warning("Disabling route %s: %s", route.id, reason)
         await self.db.set_route_enabled(route.id, False, reason)
+        await self.send_alert(
+            route.guild_id,
+            f"route:{route.id}",
+            f"Route #{route.id} paused",
+            f"**{route.full_name}** → <#{route.channel_id}>\n{reason}",
+        )
 
     # -------------------------------------------------------------------- errors
     async def on_app_command_error(self, interaction: discord.Interaction,

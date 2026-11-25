@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
 import aiosqlite
 
-from .models import Dashboard, Filing, PRCard, PRTracker, Repo, Route, Watch
+from .models import Dashboard, Digest, Filing, IssueTemplate, PRCard, PRTracker, Repo, Route, Watch
 
 log = logging.getLogger(__name__)
 
@@ -21,10 +22,14 @@ CREATE TABLE IF NOT EXISTS bot_meta (
 );
 
 CREATE TABLE IF NOT EXISTS guild_settings (
-    guild_id      INTEGER PRIMARY KEY,
-    admin_role_id INTEGER,
-    issue_access  TEXT NOT NULL DEFAULT 'admins',
-    issue_role_id INTEGER
+    guild_id         INTEGER PRIMARY KEY,
+    admin_role_id    INTEGER,
+    issue_access     TEXT NOT NULL DEFAULT 'admins',
+    issue_role_id    INTEGER,
+    autolink_issues  INTEGER NOT NULL DEFAULT 1,
+    sync_comments    INTEGER NOT NULL DEFAULT 1,
+    media_repo       TEXT,
+    alert_channel_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS repos (
@@ -104,6 +109,7 @@ CREATE TABLE IF NOT EXISTS filings (
     reply_message_id INTEGER,
     close_thread     INTEGER NOT NULL DEFAULT 0,
     state            TEXT    NOT NULL DEFAULT 'open',
+    last_comment_id  INTEGER NOT NULL DEFAULT 0,
     created_at       TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (message_id, repo_id)
 );
@@ -119,6 +125,7 @@ CREATE TABLE IF NOT EXISTS pr_trackers (
     threads         INTEGER NOT NULL DEFAULT 1,
     mention_role_id INTEGER,
     last_error      TEXT,
+    cleanup_days    INTEGER NOT NULL DEFAULT 0,
     created_by      INTEGER,
     created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -129,11 +136,26 @@ CREATE TABLE IF NOT EXISTS pr_cards (
     number      INTEGER NOT NULL,
     message_id  INTEGER,
     thread_id   INTEGER,
-    state       TEXT NOT NULL DEFAULT 'open',  -- open | merged | closed
+    state       TEXT NOT NULL DEFAULT 'open',  -- open | merged | closed | cleaned
     status_json TEXT,                          -- last status, to describe what changed
     card_hash   TEXT,
+    closed_at   REAL,
     created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (tracker_id, number)
+);
+
+CREATE TABLE IF NOT EXISTS digests (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id         INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    channel_id      INTEGER NOT NULL,
+    kind            TEXT    NOT NULL,          -- changelog | reviews
+    interval_days   INTEGER NOT NULL DEFAULT 7,
+    stale_days      INTEGER NOT NULL DEFAULT 3,
+    mention_role_id INTEGER,
+    last_sent_at    REAL,
+    last_error      TEXT,
+    created_by      INTEGER,
+    created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Last known state of each pull request, to notice when one is merged, closed, etc.
@@ -170,6 +192,24 @@ CREATE TABLE IF NOT EXISTS seen_items (
     seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (repo, stream, item_id)
 );
+
+CREATE TABLE IF NOT EXISTS issue_templates (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    label       TEXT    NOT NULL,   -- lower-cased label name, or '*' for repo default
+    title_hint  TEXT,
+    placeholder TEXT,
+    body        TEXT,
+    created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (repo_id, label)
+);
+
+CREATE TABLE IF NOT EXISTS http_cache (
+    cache_key  TEXT PRIMARY KEY,
+    etag       TEXT,
+    body_json  TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 # Columns added after the first release; applied to existing databases on startup.
@@ -177,6 +217,10 @@ MIGRATIONS = {
     "guild_settings": {
         "issue_access": "TEXT NOT NULL DEFAULT 'admins'",
         "issue_role_id": "INTEGER",
+        "autolink_issues": "INTEGER NOT NULL DEFAULT 1",
+        "sync_comments": "INTEGER NOT NULL DEFAULT 1",
+        "media_repo": "TEXT",
+        "alert_channel_id": "INTEGER",
     },
     "repos": {"issue_access": "TEXT"},
     "dashboards": {"kind": "TEXT NOT NULL DEFAULT 'issues'"},
@@ -184,6 +228,15 @@ MIGRATIONS = {
         "pr_events": "TEXT",
         "include_drafts": "INTEGER NOT NULL DEFAULT 0",
         "include_bots": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "filings": {
+        "last_comment_id": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "pr_trackers": {
+        "cleanup_days": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "pr_cards": {
+        "closed_at": "REAL",
     },
 }
 
@@ -349,6 +402,98 @@ class Database:
         )
         await self.conn.commit()
         await self._maybe_snapshot()
+
+    async def get_autolink_enabled(self, guild_id: int) -> bool:
+        async with self.conn.execute(
+            "SELECT autolink_issues FROM guild_settings WHERE guild_id = ?", (guild_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return bool(row[0]) if row else True
+
+    async def set_autolink_enabled(self, guild_id: int, enabled: bool) -> None:
+        await self.conn.execute(
+            "INSERT INTO guild_settings (guild_id, autolink_issues) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET autolink_issues = excluded.autolink_issues",
+            (guild_id, int(enabled)),
+        )
+        await self.conn.commit()
+        await self._maybe_snapshot()
+
+    async def get_comment_sync_enabled(self, guild_id: int) -> bool:
+        async with self.conn.execute(
+            "SELECT sync_comments FROM guild_settings WHERE guild_id = ?", (guild_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return bool(row[0]) if row else True
+
+    async def set_comment_sync_enabled(self, guild_id: int, enabled: bool) -> None:
+        await self.conn.execute(
+            "INSERT INTO guild_settings (guild_id, sync_comments) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET sync_comments = excluded.sync_comments",
+            (guild_id, int(enabled)),
+        )
+        await self.conn.commit()
+        await self._maybe_snapshot()
+
+    async def get_media_repo(self, guild_id: int) -> str | None:
+        async with self.conn.execute(
+            "SELECT media_repo FROM guild_settings WHERE guild_id = ?", (guild_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def set_media_repo(self, guild_id: int, repo: str | None) -> None:
+        await self.conn.execute(
+            "INSERT INTO guild_settings (guild_id, media_repo) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET media_repo = excluded.media_repo",
+            (guild_id, repo),
+        )
+        await self.conn.commit()
+        await self._maybe_snapshot()
+
+    async def get_alert_channel(self, guild_id: int) -> int | None:
+        async with self.conn.execute(
+            "SELECT alert_channel_id FROM guild_settings WHERE guild_id = ?", (guild_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return row[0] if row else None
+
+    async def set_alert_channel(self, guild_id: int, channel_id: int | None) -> None:
+        await self.conn.execute(
+            "INSERT INTO guild_settings (guild_id, alert_channel_id) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET alert_channel_id = excluded.alert_channel_id",
+            (guild_id, channel_id),
+        )
+        await self.conn.commit()
+        await self._maybe_snapshot()
+
+    # -------------------------------------------------------------- HTTP cache
+    async def get_http_cache(self, cache_key: str) -> tuple[str | None, Any] | None:
+        async with self.conn.execute(
+            "SELECT etag, body_json FROM http_cache WHERE cache_key = ?", (cache_key,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        try:
+            return row[0], json.loads(row[1])
+        except ValueError:
+            return None
+
+    async def set_http_cache(self, cache_key: str, etag: str | None, data: Any) -> None:
+        await self.conn.execute(
+            "INSERT INTO http_cache (cache_key, etag, body_json, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(cache_key) DO UPDATE SET etag = excluded.etag, "
+            "body_json = excluded.body_json, updated_at = excluded.updated_at",
+            (cache_key, etag, json.dumps(data), time.time()),
+        )
+        await self.conn.commit()
+
+    async def prune_http_cache(self, max_age_seconds: int = 7 * 86400) -> int:
+        cutoff = time.time() - max_age_seconds
+        cur = await self.conn.execute("DELETE FROM http_cache WHERE updated_at < ?", (cutoff,))
+        await self.conn.commit()
+        return cur.rowcount
 
     async def delete_guild(self, guild_id: int) -> None:
         await self.conn.execute("DELETE FROM repos WHERE guild_id = ?", (guild_id,))
@@ -614,7 +759,8 @@ class Database:
     _FILING_SELECT = (
         "SELECT f.id, f.message_id, f.repo_id, f.guild_id, p.owner, p.name, f.channel_id, "
         "f.thread_id, f.issue_number, f.issue_url, f.reporter_id, f.filer_id, "
-        "f.reply_message_id, f.close_thread, f.state FROM filings f JOIN repos p ON p.id = f.repo_id"
+        "f.reply_message_id, f.close_thread, f.state, f.last_comment_id "
+        "FROM filings f JOIN repos p ON p.id = f.repo_id"
     )
 
     @staticmethod
@@ -657,6 +803,28 @@ class Database:
         ) as cur:
             return [self._filing(row) for row in await cur.fetchall()]
 
+    async def open_filings(self) -> list[Filing]:
+        """All open watch filings (both role mentions and forum posts)."""
+        async with self.conn.execute(
+            self._FILING_SELECT + " WHERE f.state = 'open' "
+            "AND f.created_at > datetime('now', '-180 days')"
+        ) as cur:
+            return [self._filing(row) for row in await cur.fetchall()]
+
+    async def find_filing_by_reply(self, reply_message_id: int) -> Filing | None:
+        async with self.conn.execute(
+            self._FILING_SELECT + " WHERE f.reply_message_id = ?", (reply_message_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return self._filing(row) if row else None
+
+    async def find_filing_by_thread(self, thread_id: int) -> Filing | None:
+        async with self.conn.execute(
+            self._FILING_SELECT + " WHERE f.thread_id = ?", (thread_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return self._filing(row) if row else None
+
     async def set_filing_reply(self, filing_id: int, reply_message_id: int) -> None:
         await self.conn.execute("UPDATE filings SET reply_message_id = ? WHERE id = ?",
                                 (reply_message_id, filing_id))
@@ -664,6 +832,11 @@ class Database:
 
     async def set_filing_state(self, filing_id: int, state: str) -> None:
         await self.conn.execute("UPDATE filings SET state = ? WHERE id = ?", (state, filing_id))
+        await self.conn.commit()
+
+    async def set_filing_last_comment_id(self, filing_id: int, comment_id: int) -> None:
+        await self.conn.execute("UPDATE filings SET last_comment_id = ? WHERE id = ?",
+                                (comment_id, filing_id))
         await self.conn.commit()
 
     # ------------------------------------------------------------------- streams
@@ -703,8 +876,8 @@ class Database:
     # ------------------------------------------------------------- PR trackers
     _TRACKER_SELECT = (
         "SELECT t.id, t.repo_id, p.guild_id, p.owner, p.name, t.channel_id, t.branch, "
-        "t.include_drafts, t.include_bots, t.threads, t.mention_role_id, t.last_error "
-        "FROM pr_trackers t JOIN repos p ON p.id = t.repo_id"
+        "t.include_drafts, t.include_bots, t.threads, t.mention_role_id, t.last_error, "
+        "t.cleanup_days FROM pr_trackers t JOIN repos p ON p.id = t.repo_id"
     )
 
     @staticmethod
@@ -716,12 +889,13 @@ class Database:
 
     async def add_pr_tracker(self, repo: Repo, channel_id: int, *, branch: str | None,
                              include_drafts: bool, include_bots: bool, threads: bool,
-                             mention_role_id: int | None, created_by: int | None) -> PRTracker:
+                             mention_role_id: int | None, created_by: int | None,
+                             cleanup_days: int = 0) -> PRTracker:
         cur = await self.conn.execute(
             "INSERT INTO pr_trackers (repo_id, channel_id, branch, include_drafts, include_bots, "
-            "threads, mention_role_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "threads, mention_role_id, cleanup_days, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (repo.id, channel_id, branch, int(include_drafts), int(include_bots), int(threads),
-             mention_role_id, created_by))
+             mention_role_id, cleanup_days, created_by))
         await self.conn.commit()
         tracker = await self.get_pr_tracker(cur.lastrowid)
         assert tracker is not None
@@ -730,13 +904,14 @@ class Database:
 
     async def update_pr_tracker(self, tracker_id: int, guild_id: int, *, channel_id: int,
                                 branch: str | None, include_drafts: bool, include_bots: bool,
-                                threads: bool, mention_role_id: int | None) -> PRTracker | None:
+                                threads: bool, mention_role_id: int | None,
+                                cleanup_days: int = 0) -> PRTracker | None:
         await self.conn.execute(
             "UPDATE pr_trackers SET channel_id = ?, branch = ?, include_drafts = ?, "
-            "include_bots = ?, threads = ?, mention_role_id = ?, last_error = NULL "
+            "include_bots = ?, threads = ?, mention_role_id = ?, cleanup_days = ?, last_error = NULL "
             "WHERE id = ? AND repo_id IN (SELECT id FROM repos WHERE guild_id = ?)",
             (channel_id, branch, int(include_drafts), int(include_bots), int(threads),
-             mention_role_id, tracker_id, guild_id),
+             mention_role_id, cleanup_days, tracker_id, guild_id),
         )
         await self.conn.commit()
         await self._maybe_snapshot()
@@ -778,7 +953,7 @@ class Database:
 
     async def list_pr_cards(self, tracker_id: int) -> list[PRCard]:
         async with self.conn.execute(
-            "SELECT id, tracker_id, number, message_id, thread_id, state, status_json, card_hash "
+            "SELECT id, tracker_id, number, message_id, thread_id, state, status_json, card_hash, closed_at "
             "FROM pr_cards WHERE tracker_id = ? ORDER BY number", (tracker_id,)
         ) as cur:
             return [PRCard(*row) for row in await cur.fetchall()]
@@ -787,16 +962,16 @@ class Database:
         if card.id is None:
             cur = await self.conn.execute(
                 "INSERT INTO pr_cards (tracker_id, number, message_id, thread_id, state, "
-                "status_json, card_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "status_json, card_hash, closed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (card.tracker_id, card.number, card.message_id, card.thread_id, card.state,
-                 card.status_json, card.card_hash))
+                 card.status_json, card.card_hash, card.closed_at))
             card.id = cur.lastrowid
         else:
             await self.conn.execute(
                 "UPDATE pr_cards SET message_id = ?, thread_id = ?, state = ?, status_json = ?, "
-                "card_hash = ? WHERE id = ?",
+                "card_hash = ?, closed_at = ? WHERE id = ?",
                 (card.message_id, card.thread_id, card.state, card.status_json, card.card_hash,
-                 card.id))
+                 card.closed_at, card.id))
         await self.conn.commit()
         return card
 
@@ -872,6 +1047,132 @@ class Database:
         )
         await self.conn.commit()
 
+    # --------------------------------------------------------- issue templates
+    _TEMPLATE_SELECT = (
+        "SELECT t.id, t.repo_id, p.guild_id, p.owner, p.name, t.label, "
+        "t.title_hint, t.placeholder, t.body "
+        "FROM issue_templates t JOIN repos p ON p.id = t.repo_id"
+    )
+
+    async def set_issue_template(self, repo: Repo, label: str, *,
+                                 title_hint: str | None = None,
+                                 placeholder: str | None = None,
+                                 body: str | None = None) -> IssueTemplate:
+        key = label.strip().lower() or "*"
+        await self.conn.execute(
+            "INSERT INTO issue_templates (repo_id, label, title_hint, placeholder, body) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(repo_id, label) DO UPDATE SET title_hint = excluded.title_hint, "
+            "placeholder = excluded.placeholder, body = excluded.body",
+            (repo.id, key, title_hint, placeholder, body),
+        )
+        await self.conn.commit()
+        await self._maybe_snapshot()
+        async with self.conn.execute(
+            self._TEMPLATE_SELECT + " WHERE t.repo_id = ? AND t.label = ?",
+            (repo.id, key),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        return IssueTemplate(*row)
+
+    async def get_issue_template(self, repo_id: int,
+                                 labels: str | None = None) -> IssueTemplate | None:
+        candidates = [lbl.strip().lower() for lbl in (labels or "").split(",") if lbl.strip()]
+        candidates.append("*")
+        async with self.conn.execute(
+            self._TEMPLATE_SELECT + " WHERE t.repo_id = ?", (repo_id,)
+        ) as cur:
+            by_label = {row[5]: IssueTemplate(*row) for row in await cur.fetchall()}
+        for candidate in candidates:
+            if candidate in by_label:
+                return by_label[candidate]
+        return None
+
+    async def list_issue_templates(self, guild_id: int,
+                                   repo_id: int | None = None) -> list[IssueTemplate]:
+        sql, params = self._TEMPLATE_SELECT + " WHERE p.guild_id = ?", [guild_id]
+        if repo_id is not None:
+            sql += " AND t.repo_id = ?"
+            params.append(repo_id)
+        sql += " ORDER BY lower(p.owner), lower(p.name), t.label"
+        async with self.conn.execute(sql, params) as cur:
+            return [IssueTemplate(*row) for row in await cur.fetchall()]
+
+    async def remove_issue_template(self, guild_id: int, repo_id: int, label: str) -> bool:
+        key = label.strip().lower() or "*"
+        cur = await self.conn.execute(
+            "DELETE FROM issue_templates WHERE repo_id = ? AND label = ? "
+            "AND repo_id IN (SELECT id FROM repos WHERE guild_id = ?)",
+            (repo_id, key, guild_id),
+        )
+        await self.conn.commit()
+        if cur.rowcount:
+            await self._maybe_snapshot()
+        return cur.rowcount > 0
+
+    # ------------------------------------------------------------------ digests
+    _DIGEST_SELECT = (
+        "SELECT d.id, d.repo_id, p.guild_id, p.owner, p.name, d.channel_id, d.kind, "
+        "d.interval_days, d.stale_days, d.mention_role_id, d.last_sent_at, d.last_error "
+        "FROM digests d JOIN repos p ON p.id = d.repo_id"
+    )
+
+    async def add_digest(self, repo: Repo, channel_id: int, kind: str, *,
+                         interval_days: int = 7, stale_days: int = 3,
+                         mention_role_id: int | None = None,
+                         created_by: int | None = None) -> Digest:
+        cur = await self.conn.execute(
+            "INSERT INTO digests (repo_id, channel_id, kind, interval_days, stale_days, "
+            "mention_role_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (repo.id, channel_id, kind, interval_days, stale_days, mention_role_id, created_by),
+        )
+        await self.conn.commit()
+        digest = await self.get_digest(cur.lastrowid)
+        assert digest is not None
+        await self._maybe_snapshot()
+        return digest
+
+    async def get_digest(self, digest_id: int, guild_id: int | None = None) -> Digest | None:
+        sql, params = self._DIGEST_SELECT + " WHERE d.id = ?", [digest_id]
+        if guild_id is not None:
+            sql += " AND p.guild_id = ?"
+            params.append(guild_id)
+        async with self.conn.execute(sql, params) as cur:
+            row = await cur.fetchone()
+        return Digest(*row) if row else None
+
+    async def list_digests(self, guild_id: int | None = None) -> list[Digest]:
+        sql, params = self._DIGEST_SELECT, []
+        if guild_id is not None:
+            sql += " WHERE p.guild_id = ?"
+            params.append(guild_id)
+        async with self.conn.execute(sql + " ORDER BY d.id", params) as cur:
+            return [Digest(*row) for row in await cur.fetchall()]
+
+    async def set_digest_sent(self, digest_id: int, sent_at: float) -> None:
+        await self.conn.execute(
+            "UPDATE digests SET last_sent_at = ?, last_error = NULL WHERE id = ?",
+            (sent_at, digest_id),
+        )
+        await self.conn.commit()
+
+    async def set_digest_error(self, digest_id: int, error: str | None) -> None:
+        await self.conn.execute("UPDATE digests SET last_error = ? WHERE id = ?", (error, digest_id))
+        await self.conn.commit()
+
+    async def remove_digest(self, digest_id: int) -> None:
+        await self.conn.execute("DELETE FROM digests WHERE id = ?", (digest_id,))
+        await self.conn.commit()
+        await self._maybe_snapshot()
+
+    async def remove_digests_for_channel(self, channel_id: int) -> int:
+        cur = await self.conn.execute("DELETE FROM digests WHERE channel_id = ?", (channel_id,))
+        await self.conn.commit()
+        if cur.rowcount:
+            await self._maybe_snapshot()
+        return cur.rowcount
+
     # ----------------------------------------------------------- config backup
     async def list_guild_ids(self) -> list[int]:
         async with self.conn.execute(
@@ -897,6 +1198,8 @@ class Database:
             dashboards = await self.list_dashboards(gid)
             watches = await self.list_watches(gid)
             trackers = await self.list_pr_trackers(gid)
+            templates = await self.list_issue_templates(gid)
+            digests = await self.list_digests(gid)
 
             repo_entries: list[dict[str, Any]] = []
             for repo in repos:
@@ -949,8 +1252,28 @@ class Database:
                             "include_bots": t.include_bots,
                             "threads": t.threads,
                             "mention_role_id": t.mention_role_id,
+                            "cleanup_days": t.cleanup_days,
                         }
                         for t in trackers if t.repo_id == repo.id
+                    ],
+                    "issue_templates": [
+                        {
+                            "label": tpl.label,
+                            "title_hint": tpl.title_hint,
+                            "placeholder": tpl.placeholder,
+                            "body": tpl.body,
+                        }
+                        for tpl in templates if tpl.repo_id == repo.id
+                    ],
+                    "digests": [
+                        {
+                            "channel_id": dg.channel_id,
+                            "kind": dg.kind,
+                            "interval_days": dg.interval_days,
+                            "stale_days": dg.stale_days,
+                            "mention_role_id": dg.mention_role_id,
+                        }
+                        for dg in digests if dg.repo_id == repo.id
                     ],
                 })
 
@@ -959,6 +1282,10 @@ class Database:
                     "admin_role_id": admin_role_id,
                     "issue_access": issue_access,
                     "issue_role_id": issue_role_id,
+                    "autolink_issues": await self.get_autolink_enabled(gid),
+                    "sync_comments": await self.get_comment_sync_enabled(gid),
+                    "media_repo": await self.get_media_repo(gid),
+                    "alert_channel_id": await self.get_alert_channel(gid),
                 },
                 "repos": repo_entries,
             }
@@ -985,7 +1312,7 @@ class Database:
 
         counts = {
             "guilds": 0, "repos": 0, "routes": 0,
-            "dashboards": 0, "watches": 0, "pr_trackers": 0,
+            "dashboards": 0, "watches": 0, "pr_trackers": 0, "templates": 0, "digests": 0,
         }
         self._suppress_snapshot = True
         try:
@@ -1000,6 +1327,14 @@ class Database:
                     await self.set_issue_access(gid, settings["issue_access"])
                 if "issue_role_id" in settings:
                     await self.set_issue_role(gid, settings.get("issue_role_id"))
+                if "autolink_issues" in settings:
+                    await self.set_autolink_enabled(gid, bool(settings["autolink_issues"]))
+                if "sync_comments" in settings:
+                    await self.set_comment_sync_enabled(gid, bool(settings["sync_comments"]))
+                if "media_repo" in settings:
+                    await self.set_media_repo(gid, settings.get("media_repo"))
+                if "alert_channel_id" in settings:
+                    await self.set_alert_channel(gid, settings.get("alert_channel_id"))
 
                 for rdata in gdata.get("repos") or []:
                     repo = await self.get_repo(gid, rdata["owner"], rdata["name"])
@@ -1092,9 +1427,43 @@ class Database:
                             include_bots=bool(td.get("include_bots", False)),
                             threads=bool(td.get("threads", True)),
                             mention_role_id=td.get("mention_role_id"), created_by=None,
+                            cleanup_days=int(td.get("cleanup_days", 0) or 0),
                         )
                         existing_trackers.add(sig)
                         counts["pr_trackers"] += 1
+
+                    existing_templates = {
+                        tpl.label for tpl in await self.list_issue_templates(gid, repo.id)
+                    }
+                    for tpl in rdata.get("issue_templates") or []:
+                        lbl = (tpl.get("label") or "*").strip().lower() or "*"
+                        if lbl in existing_templates:
+                            continue
+                        await self.set_issue_template(
+                            repo, lbl,
+                            title_hint=tpl.get("title_hint"),
+                            placeholder=tpl.get("placeholder"),
+                            body=tpl.get("body"),
+                        )
+                        existing_templates.add(lbl)
+                        counts["templates"] += 1
+
+                    existing_digests = {
+                        (dg.channel_id, dg.kind)
+                        for dg in await self.list_digests(gid) if dg.repo_id == repo.id
+                    }
+                    for dg in rdata.get("digests") or []:
+                        sig = (dg["channel_id"], dg["kind"])
+                        if sig in existing_digests:
+                            continue
+                        await self.add_digest(
+                            repo, dg["channel_id"], dg["kind"],
+                            interval_days=int(dg.get("interval_days", 7) or 7),
+                            stale_days=int(dg.get("stale_days", 3) or 3),
+                            mention_role_id=dg.get("mention_role_id"),
+                        )
+                        existing_digests.add(sig)
+                        counts["digests"] += 1
         finally:
             self._suppress_snapshot = False
         await self._maybe_snapshot()

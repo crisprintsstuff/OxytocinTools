@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import time
@@ -236,11 +237,20 @@ class DashboardManager:
 
     async def _fetch(self, owner: str, name: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         key = (owner.lower(), name.lower(), tuple(sorted(params.items())))
+        db_key = "dash:" + json.dumps(
+            [owner.lower(), name.lower(), sorted(params.items())], separators=(",", ":")
+        )
+        if key not in self._cache and hasattr(self.bot.db, "get_http_cache"):
+            persisted = await self.bot.db.get_http_cache(db_key)
+            if persisted is not None:
+                self._cache[key] = persisted
         etag, cached = self._cache.get(key, (None, []))
         items, new_etag = await self.bot.github.list_issues(owner, name, params, etag)
         if items is None:  # 304: unchanged since last time
             return cached
         self._cache[key] = (new_etag, items)
+        if new_etag and hasattr(self.bot.db, "set_http_cache"):
+            await self.bot.db.set_http_cache(db_key, new_etag, items)
         return items
 
     async def snapshot(self, dash: Dashboard) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -309,7 +319,13 @@ class DashboardManager:
                     embed, digest = render_dashboard(dash, open_items, closed,
                                                      interval=self.bot.poller.interval)
             except GitHubError as exc:
-                await db.set_dashboard_error(dash.id, f"GitHub: {exc}")
+                err = f"GitHub: {exc}"
+                await db.set_dashboard_error(dash.id, err)
+                if hasattr(self.bot, "send_alert"):
+                    await self.bot.send_alert(
+                        dash.guild_id, f"dash:{dash.id}", f"Dashboard #{dash.id} error",
+                        f"**{dash.describe()}** in <#{dash.channel_id}>\n{err}",
+                    )
                 return
             changed = digest != dash.last_hash
             last_change = time.time() if changed or dash.last_change is None else dash.last_change
@@ -321,7 +337,13 @@ class DashboardManager:
                 channel = self.bot.get_channel(dash.channel_id) or \
                     await self.bot.fetch_channel(dash.channel_id)
             except (discord.NotFound, discord.Forbidden):
-                await db.set_dashboard_error(dash.id, "Channel is gone or I can't see it")
+                err = "Channel is gone or I can't see it"
+                await db.set_dashboard_error(dash.id, err)
+                if hasattr(self.bot, "send_alert"):
+                    await self.bot.send_alert(
+                        dash.guild_id, f"dash:{dash.id}", f"Dashboard #{dash.id} error",
+                        f"**{dash.describe()}** in <#{dash.channel_id}>\n{err}",
+                    )
                 return
             if not isinstance(channel, discord.TextChannel):
                 await db.set_dashboard_error(dash.id, "Channel is not a text channel")
@@ -345,7 +367,13 @@ class DashboardManager:
                         except discord.HTTPException as exc:
                             log.warning("Couldn't pin dashboard %s: %s", dash.id, exc)
             except discord.HTTPException as exc:
-                await db.set_dashboard_error(dash.id, f"Discord: {exc.text or exc}")
+                err = f"Discord: {exc.text or exc}"
+                await db.set_dashboard_error(dash.id, err)
+                if hasattr(self.bot, "send_alert"):
+                    await self.bot.send_alert(
+                        dash.guild_id, f"dash:{dash.id}", f"Dashboard #{dash.id} error",
+                        f"**{dash.describe()}** in <#{dash.channel_id}>\n{err}",
+                    )
                 return
             await db.set_dashboard_state(dash.id, last_hash=digest, last_change=last_change,
                                          error=None)
@@ -381,7 +409,10 @@ class DashboardManager:
         if not allowed:
             raise UserError(reason or "You can't create issues here.")
         await cog.check_cooldown(interaction)  # type: ignore[attr-defined]
-        await interaction.response.send_modal(IssueModal(cog, repo, labels=dash.label))  # type: ignore[arg-type]
+        template = await self.bot.db.get_issue_template(repo.id, dash.label)
+        await interaction.response.send_modal(
+            IssueModal(cog, repo, labels=dash.label, template=template)  # type: ignore[arg-type]
+        )
 
     async def handle_refresh(self, interaction: discord.Interaction, dashboard_id: int) -> None:
         dash = await self._get(interaction, dashboard_id)

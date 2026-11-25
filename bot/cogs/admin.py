@@ -10,8 +10,9 @@ from discord import app_commands
 from discord.ext import commands
 
 from ..checks import UserError, bot_admin
-from ..models import ISSUE_ACCESS_LABELS
-from . import repo_autocomplete, resolve_tracked_repo
+from ..github import NotFound
+from ..models import ISSUE_ACCESS_LABELS, parse_repo
+from . import access_hint, missing_channel_perms, repo_autocomplete, resolve_tracked_repo
 
 if TYPE_CHECKING:
     from ..main import TrackerBot
@@ -102,15 +103,18 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
         dashboards = await bot.db.list_dashboards(interaction.guild.id)
         watches = await bot.db.list_watches(interaction.guild.id)
         trackers = await bot.db.list_pr_trackers(interaction.guild.id)
+        digests = await bot.db.list_digests(interaction.guild.id)
         role_id = await bot.db.get_admin_role(interaction.guild.id)
+        alert_ch = await bot.db.get_alert_channel(interaction.guild.id)
 
         embed = discord.Embed(title="Tracker status", color=discord.Color.blurple())
         embed.add_field(name="This server",
                         value=f"{len(repos)} repo(s)\n{sum(r.enabled for r in routes)} active / "
                               f"{len(routes)} route(s)\n"
                               f"{len(dashboards)} dashboard(s) · {len(watches)} watch(es) · "
-                              f"{len(trackers)} PR tracker(s)\nAdmin role: "
-                              f"{f'<@&{role_id}>' if role_id else 'none'}")
+                              f"{len(trackers)} PR tracker(s) · {len(digests)} digest(s)\n"
+                              f"Admin role: {f'<@&{role_id}>' if role_id else 'none'} · "
+                              f"Alert channel: {f'<#{alert_ch}>' if alert_ch else 'none'}")
         last = discord.utils.format_dt(_dt(poller.last_run), "R") \
             if poller.last_run else "not yet"
         nxt = discord.utils.format_dt(_dt(poller.next_run), "R") \
@@ -139,11 +143,17 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
                         inline=False)
 
         default, issue_role = await bot.db.get_issue_settings(interaction.guild.id)
+        autolink = await bot.db.get_autolink_enabled(interaction.guild.id)
+        sync_comments = await bot.db.get_comment_sync_enabled(interaction.guild.id)
         overrides = [f"{r.full_name}: {ISSUE_ACCESS_LABELS[r.issue_access]}"
                      for r in repos if r.issue_access]
+        media_repo = await bot.db.get_media_repo(interaction.guild.id) or bot.config.media_repo
         issue_info = (f"Default: {ISSUE_ACCESS_LABELS.get(default, default)}\n"
                       f"Issue role: {f'<@&{issue_role}>' if issue_role else 'none'}\n"
-                      f"Cooldown: {bot.config.issue_cooldown}s (admins exempt)")
+                      f"Cooldown: {bot.config.issue_cooldown}s (admins exempt)\n"
+                      f"Auto-link #123: {'on' if autolink else 'off'} · "
+                      f"Comment sync: {'on' if sync_comments else 'off'}"
+                      + (f"\nMedia repo: `{media_repo}`" if media_repo else ""))
         if overrides:
             issue_info += "\nOverrides:\n" + "\n".join(overrides)
         embed.add_field(name="Issue creation", value=issue_info[:1024], inline=False)
@@ -162,6 +172,9 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
         for t in trackers:
             if t.last_error:
                 problems.append(f"PR tracker `#{t.id}` ({t.full_name}): {t.last_error}")
+        for dg in digests:
+            if dg.last_error:
+                problems.append(f"Digest `#{dg.id}` ({dg.full_name}): {dg.last_error}")
         if problems:
             embed.add_field(name="⚠️ Problems", value="\n".join(problems)[:1024], inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True,
@@ -224,6 +237,80 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
         await interaction.response.defer(ephemeral=True, thinking=True)
         count = await self.bot.sync_commands(force=True)
         await interaction.followup.send(f"✅ Synced {count} global slash command(s).", ephemeral=True)
+
+    @app_commands.command(name="autolink",
+                          description="Toggle automatic #123 issue/PR preview embeds in chat")
+    @app_commands.describe(enabled="Whether #123 references in chat post preview embeds")
+    @bot_admin()
+    async def autolink(self, interaction: discord.Interaction, enabled: bool) -> None:
+        assert interaction.guild is not None
+        await self.bot.db.set_autolink_enabled(interaction.guild.id, enabled)
+        state = "enabled" if enabled else "disabled"
+        await interaction.response.send_message(
+            f"✅ Automatic `#123` issue/PR previews are now **{state}**.", ephemeral=True
+        )
+
+    @app_commands.command(name="comment-sync",
+                          description="Toggle two-way comment syncing for filed issues")
+    @app_commands.describe(enabled="Sync Discord replies/thread posts and GitHub comments")
+    @bot_admin()
+    async def comment_sync(self, interaction: discord.Interaction, enabled: bool) -> None:
+        assert interaction.guild is not None
+        await self.bot.db.set_comment_sync_enabled(interaction.guild.id, enabled)
+        state = "enabled" if enabled else "disabled"
+        await interaction.response.send_message(
+            f"✅ Two-way comment syncing for filed issues is now **{state}**.", ephemeral=True
+        )
+
+    @app_commands.command(name="media-repo",
+                          description="Set a dedicated repo for hosting Discord attachments (empty to clear)")
+    @app_commands.describe(repo="owner/name or URL of a repo (leave empty to host in each repo)")
+    @bot_admin()
+    async def media_repo(self, interaction: discord.Interaction, repo: str | None = None) -> None:
+        assert interaction.guild is not None
+        if not repo or not repo.strip():
+            await self.bot.db.set_media_repo(interaction.guild.id, None)
+            await interaction.response.send_message(
+                "✅ Cleared dedicated media repo. Attachments will be hosted in each issue's repo.",
+                ephemeral=True,
+            )
+            return
+        try:
+            owner, name = parse_repo(repo)
+        except ValueError as exc:
+            raise UserError(str(exc)) from exc
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            data = await self.bot.github.get_repo(owner, name)
+        except NotFound:
+            raise UserError(f"Couldn't find `{owner}/{name}` on GitHub. "
+                            + access_hint(self.bot, f"{owner}/{name}"))
+        canonical = f"{data['owner']['login']}/{data['name']}"
+        await self.bot.db.set_media_repo(interaction.guild.id, canonical)
+        await interaction.followup.send(
+            f"✅ Attachments for this server will be hosted in **{canonical}** (`discord-attachments` branch).",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="alerts",
+                          description="Set a channel for bot error alerts (leave empty to disable)")
+    @app_commands.describe(channel="Private staff channel for error alerts (empty to disable)")
+    @bot_admin()
+    async def alerts(self, interaction: discord.Interaction,
+                     channel: discord.TextChannel | None = None) -> None:
+        assert interaction.guild is not None
+        if channel is None:
+            await self.bot.db.set_alert_channel(interaction.guild.id, None)
+            await interaction.response.send_message(
+                "✅ Error alert channel cleared.", ephemeral=True
+            )
+            return
+        if missing := missing_channel_perms(channel):
+            raise UserError(f"I'm missing {', '.join(missing)} in {channel.mention}.")
+        await self.bot.db.set_alert_channel(interaction.guild.id, channel.id)
+        await interaction.response.send_message(
+            f"✅ Bot error alerts will be posted to {channel.mention}.", ephemeral=True
+        )
 
 
 async def setup(bot: TrackerBot) -> None:

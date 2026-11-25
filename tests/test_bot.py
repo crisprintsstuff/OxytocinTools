@@ -38,11 +38,13 @@ async def test_all_commands_register():
     assert groups == {
         "repo": ["info", "latest", "list", "track", "untrack"],
         "route": ["add", "edit", "list", "remove", "test", "toggle"],
-        "admin": ["check-now", "clear-role", "export", "import", "issue-access", "issue-role", "set-role", "status", "sync"],
-        "issue": ["create"],
+        "admin": ["alerts", "autolink", "check-now", "clear-role", "comment-sync", "export",
+                  "import", "issue-access", "issue-role", "media-repo", "set-role", "status", "sync"],
+        "issue": ["create", "search", "template-list", "template-remove", "template-set", "view"],
         "dashboard": ["create", "list", "remove"],
         "watch": ["edit", "forum", "list", "remove", "role"],
         "pr": ["edit", "list", "stop", "track"],
+        "digest": ["add", "list", "remove", "run"],
         "Create GitHub issue": [],
     }
     # Payloads must serialise (catches invalid option definitions).

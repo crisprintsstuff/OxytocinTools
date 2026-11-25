@@ -6,11 +6,14 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import discord
 
+from .checks import UserError
 from .embeds import GREEN, GREY, PURPLE, RED, truncate
 from .github import GitHubError, RateLimited
 from .models import PRCard, PRTracker
@@ -22,6 +25,7 @@ log = logging.getLogger(__name__)
 
 MAX_NEW_CARDS_PER_SYNC = 10
 THREAD_ARCHIVE_MINUTES = 10080  # 7 days without activity
+MANUAL_REFRESH_COOLDOWN = 15
 
 PENDING_STATUSES = {"queued", "in_progress", "waiting", "requested", "pending"}
 FAILED_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required", "startup_failure",
@@ -231,12 +235,37 @@ def render_card(repo: str, pr: dict[str, Any], status: dict[str, Any]) -> tuple[
     return embed, digest
 
 
-def card_view(pr: dict[str, Any]) -> discord.ui.View:
+class RefreshPRCardButton(discord.ui.DynamicItem[discord.ui.Button],
+                          template=r"prcard:refresh:(?P<tracker>[0-9]+):(?P<number>[0-9]+)"):
+    def __init__(self, tracker_id: int, number: int):
+        super().__init__(discord.ui.Button(
+            label="Refresh", emoji="🔄", style=discord.ButtonStyle.secondary,
+            custom_id=f"prcard:refresh:{tracker_id}:{number}",
+        ))
+        self.tracker_id = tracker_id
+        self.number = number
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match: re.Match[str]):
+        return cls(int(match["tracker"]), int(match["number"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        bot: TrackerBot = interaction.client  # type: ignore[assignment]
+        try:
+            await bot.prcards.handle_refresh(interaction, self.tracker_id, self.number)
+        except Exception as exc:
+            await bot.on_app_command_error(interaction, exc)  # type: ignore[arg-type]
+
+
+def card_view(pr: dict[str, Any], *, tracker_id: int | None = None) -> discord.ui.View:
     url = pr.get("html_url") or ""
     view = discord.ui.View(timeout=None)
     view.add_item(discord.ui.Button(label="Open PR", url=url))
     view.add_item(discord.ui.Button(label="Checks", url=f"{url}/checks"))
     view.add_item(discord.ui.Button(label="Files", url=f"{url}/files"))
+    is_open = not pr.get("merged_at") and (pr.get("state") or "open") == "open"
+    if tracker_id is not None and is_open:
+        view.add_item(RefreshPRCardButton(tracker_id, pr["number"]))
     return view
 
 
@@ -248,6 +277,7 @@ class PRCardManager:
         self._cache: dict[tuple[Any, ...], tuple[str | None, Any]] = {}
         self._used: set[tuple[Any, ...]] = set()
         self._no_checks: set[str] = set()  # repos where reading checks is forbidden (per cycle)
+        self._manual: dict[tuple[int, int], float] = {}
 
     def checks_blocked(self, repo: str) -> bool:
         """Whether the last update found that the bot may not read this repo's checks."""
@@ -257,11 +287,18 @@ class PRCardManager:
         """GET with an ETag cache, so unchanged data doesn't count against the rate limit."""
         key = (path, tuple(sorted((params or {}).items())))
         self._used.add(key)
+        db_key = "pr:" + json.dumps([path, sorted((params or {}).items())], separators=(",", ":"))
+        if key not in self._cache and hasattr(self.bot.db, "get_http_cache"):
+            persisted = await self.bot.db.get_http_cache(db_key)
+            if persisted is not None:
+                self._cache[key] = persisted
         etag, cached = self._cache.get(key, (None, None))
         status, data, new_etag = await self.bot.github._get(path, params, etag if cached is not None else None)
         if status == 304:
             return cached
         self._cache[key] = (new_etag, data)
+        if new_etag and hasattr(self.bot.db, "set_http_cache"):
+            await self.bot.db.set_http_cache(db_key, new_etag, data)
         return data
 
     # The cache is shared with PR dashboards. A poll cycle is: begin_cycle(), dashboards
@@ -337,7 +374,61 @@ class PRCardManager:
         for card in cards.values():
             if card.state == "open" and card.number not in open_numbers:
                 error = await self._update(tracker, card, card.number) or error
+        if tracker.cleanup_days > 0:
+            await self._cleanup_old_cards(tracker, await self.bot.db.list_pr_cards(tracker.id))
         await self.bot.db.set_pr_tracker_error(tracker.id, error)
+        if error and hasattr(self.bot, "send_alert"):
+            await self.bot.send_alert(
+                tracker.guild_id, f"pr:{tracker.id}", f"PR tracker #{tracker.id} error",
+                f"{tracker.describe()}\n{error}",
+            )
+
+    async def _cleanup_old_cards(self, tracker: PRTracker, cards: list[PRCard]) -> None:
+        cutoff = time.time() - tracker.cleanup_days * 86400
+        due = [
+            c for c in cards
+            if c.state in ("merged", "closed") and c.closed_at is not None and c.closed_at <= cutoff
+        ]
+        if not due:
+            return
+        channel = self.bot.get_channel(tracker.channel_id)
+        if channel is None and hasattr(self.bot, "fetch_channel"):
+            try:
+                channel = await self.bot.fetch_channel(tracker.channel_id)
+            except discord.HTTPException:
+                channel = None
+        for card in due:
+            if isinstance(channel, discord.TextChannel) and card.message_id:
+                try:
+                    partial = channel.get_partial_message(card.message_id)
+                    if hasattr(partial, "delete"):
+                        await partial.delete()
+                except (discord.HTTPException, AttributeError):
+                    pass
+            card.message_id = None
+            card.state = "cleaned"
+            await self.bot.db.save_pr_card(card)
+
+    async def handle_refresh(self, interaction: discord.Interaction,
+                             tracker_id: int, number: int) -> None:
+        tracker = await self.bot.db.get_pr_tracker(tracker_id, interaction.guild_id)
+        if tracker is None:
+            raise UserError("This PR tracker no longer exists.")
+        key = (tracker_id, number)
+        last = self._manual.get(key)
+        if last is not None and time.monotonic() - last < MANUAL_REFRESH_COOLDOWN:
+            await interaction.response.send_message(
+                "It was just refreshed. Try again in a few seconds.", ephemeral=True
+            )
+            return
+        self._manual[key] = time.monotonic()
+        await interaction.response.defer()
+        async with self._lock:
+            cards = {c.number: c for c in await self.bot.db.list_pr_cards(tracker_id)}
+            card = cards.get(number) or PRCard(None, tracker_id, number)
+            err = await self._update(tracker, card, number)
+        if err:
+            await interaction.followup.send(f"❌ Couldn't refresh: {err}", ephemeral=True)
 
     async def _checks(self, repo_key: str, base: str, sha: str | None) -> dict[str, Any]:
         if not sha:
@@ -394,12 +485,16 @@ class PRCardManager:
         card.state = status["state"]
         card.status_json = json.dumps(status)
         card.card_hash = digest
+        if status["state"] == "open":
+            card.closed_at = None
+        elif card.closed_at is None:
+            card.closed_at = time.time()
         await self.bot.db.save_pr_card(card)
         return None
 
     async def _post_card(self, tracker: PRTracker, channel: discord.TextChannel, card: PRCard,
                          pr: dict[str, Any], embed: discord.Embed) -> None:
-        view = card_view(pr)
+        view = card_view(pr, tracker_id=tracker.id)
         if card.message_id:
             try:
                 await channel.get_partial_message(card.message_id).edit(embed=embed, view=view)

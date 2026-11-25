@@ -182,7 +182,9 @@ async def test_cards_follow_a_pr_from_open_to_merged(db):
     assert len(channel.sent) == 1  # drafts and bots don't get cards
     content, kwargs = channel.sent[0]
     assert content == "<@&77>" and kwargs["embed"].title == "🟢 #1 Add feature 1"
-    assert [b.label for b in kwargs["view"].children] == ["Open PR", "Checks", "Files"]
+    assert [getattr(b, "item", b).label for b in kwargs["view"].children] == [
+        "Open PR", "Checks", "Files", "Refresh"
+    ]
     (card,) = await db.list_pr_cards(tracker.id)
     thread = channel.made_threads[card.thread_id]
     assert thread.name == "#1 Add feature 1"
