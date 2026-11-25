@@ -9,7 +9,18 @@ from typing import Any, Iterable
 
 import aiosqlite
 
-from .models import Dashboard, Digest, Filing, IssueTemplate, PRCard, PRTracker, Repo, Route, Watch
+from .models import (
+    Dashboard,
+    Digest,
+    Filing,
+    IssueTemplate,
+    PRCard,
+    PRTracker,
+    Repo,
+    Route,
+    Showcase,
+    Watch,
+)
 
 log = logging.getLogger(__name__)
 
@@ -202,6 +213,26 @@ CREATE TABLE IF NOT EXISTS issue_templates (
     body        TEXT,
     created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (repo_id, label)
+);
+
+CREATE TABLE IF NOT EXISTS showcases (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id          INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    channel_id       INTEGER NOT NULL,
+    source           TEXT    NOT NULL,   -- 'file' | 'releases'
+    file_path        TEXT,
+    branch           TEXT,
+    section          TEXT,
+    release_kind     TEXT    NOT NULL DEFAULT 'stable',
+    max_releases     INTEGER NOT NULL DEFAULT 10,
+    title            TEXT,
+    pinned           INTEGER NOT NULL DEFAULT 0,
+    message_ids_json TEXT,
+    last_hash        TEXT,
+    last_change      REAL,
+    last_error       TEXT,
+    created_by       INTEGER,
+    created_at       TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS http_cache (
@@ -1173,6 +1204,111 @@ class Database:
             await self._maybe_snapshot()
         return cur.rowcount
 
+    # ---------------------------------------------------------------- showcases
+    _SHOWCASE_SELECT = (
+        "SELECT s.id, s.repo_id, p.guild_id, p.owner, p.name, s.channel_id, s.source, "
+        "s.file_path, s.branch, s.section, s.release_kind, s.max_releases, s.title, "
+        "s.pinned, s.message_ids_json, s.last_hash, s.last_change, s.last_error "
+        "FROM showcases s JOIN repos p ON p.id = s.repo_id"
+    )
+
+    @staticmethod
+    def _showcase(row: Iterable[Any]) -> Showcase:
+        values = list(row)
+        values[13] = bool(values[13])
+        return Showcase(*values)
+
+    async def add_showcase(self, repo: Repo, channel_id: int, source: str, *,
+                           file_path: str | None = None, branch: str | None = None,
+                           section: str | None = None, release_kind: str = "stable",
+                           max_releases: int = 10, title: str | None = None,
+                           pinned: bool = False, created_by: int | None = None) -> Showcase:
+        cur = await self.conn.execute(
+            "INSERT INTO showcases (repo_id, channel_id, source, file_path, branch, section, "
+            "release_kind, max_releases, title, pinned, created_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (repo.id, channel_id, source, file_path, branch, section, release_kind,
+             max_releases, title, int(pinned), created_by),
+        )
+        await self.conn.commit()
+        showcase = await self.get_showcase(cur.lastrowid)
+        assert showcase is not None
+        await self._maybe_snapshot()
+        return showcase
+
+    async def update_showcase(self, showcase_id: int, *, file_path: str | None,
+                              branch: str | None, section: str | None,
+                              release_kind: str, max_releases: int,
+                              title: str | None, pinned: bool) -> Showcase | None:
+        await self.conn.execute(
+            "UPDATE showcases SET file_path = ?, branch = ?, section = ?, release_kind = ?, "
+            "max_releases = ?, title = ?, pinned = ?, last_hash = NULL, last_error = NULL "
+            "WHERE id = ?",
+            (file_path, branch, section, release_kind, max_releases, title, int(pinned), showcase_id),
+        )
+        await self.conn.commit()
+        await self._maybe_snapshot()
+        return await self.get_showcase(showcase_id)
+
+    async def get_showcase(self, showcase_id: int, guild_id: int | None = None) -> Showcase | None:
+        sql, params = self._SHOWCASE_SELECT + " WHERE s.id = ?", [showcase_id]
+        if guild_id is not None:
+            sql += " AND p.guild_id = ?"
+            params.append(guild_id)
+        async with self.conn.execute(sql, params) as cur:
+            row = await cur.fetchone()
+        return self._showcase(row) if row else None
+
+    async def list_showcases(self, guild_id: int | None = None) -> list[Showcase]:
+        sql, params = self._SHOWCASE_SELECT, []
+        if guild_id is not None:
+            sql += " WHERE p.guild_id = ?"
+            params.append(guild_id)
+        async with self.conn.execute(sql + " ORDER BY s.id", params) as cur:
+            return [self._showcase(row) for row in await cur.fetchall()]
+
+    async def find_showcase_by_message(self, message_id: int) -> Showcase | None:
+        async with self.conn.execute(
+            self._SHOWCASE_SELECT + " WHERE s.message_ids_json IS NOT NULL"
+        ) as cur:
+            for row in await cur.fetchall():
+                sc = self._showcase(row)
+                if message_id in sc.message_ids:
+                    return sc
+        return None
+
+    async def set_showcase_messages(self, showcase_id: int, message_ids: list[int]) -> None:
+        payload = json.dumps(message_ids) if message_ids else None
+        await self.conn.execute(
+            "UPDATE showcases SET message_ids_json = ? WHERE id = ?",
+            (payload, showcase_id),
+        )
+        await self.conn.commit()
+
+    async def set_showcase_state(self, showcase_id: int, *, last_hash: str,
+                                 last_change: float, error: str | None = None) -> None:
+        await self.conn.execute(
+            "UPDATE showcases SET last_hash = ?, last_change = ?, last_error = ? WHERE id = ?",
+            (last_hash, last_change, error, showcase_id),
+        )
+        await self.conn.commit()
+
+    async def set_showcase_error(self, showcase_id: int, error: str | None) -> None:
+        await self.conn.execute("UPDATE showcases SET last_error = ? WHERE id = ?", (error, showcase_id))
+        await self.conn.commit()
+
+    async def remove_showcase(self, showcase_id: int) -> None:
+        await self.conn.execute("DELETE FROM showcases WHERE id = ?", (showcase_id,))
+        await self.conn.commit()
+        await self._maybe_snapshot()
+
+    async def remove_showcases_for_channel(self, channel_id: int) -> int:
+        cur = await self.conn.execute("DELETE FROM showcases WHERE channel_id = ?", (channel_id,))
+        await self.conn.commit()
+        if cur.rowcount:
+            await self._maybe_snapshot()
+        return cur.rowcount
+
     # ----------------------------------------------------------- config backup
     async def list_guild_ids(self) -> list[int]:
         async with self.conn.execute(
@@ -1200,6 +1336,7 @@ class Database:
             trackers = await self.list_pr_trackers(gid)
             templates = await self.list_issue_templates(gid)
             digests = await self.list_digests(gid)
+            showcases = await self.list_showcases(gid)
 
             repo_entries: list[dict[str, Any]] = []
             for repo in repos:
@@ -1275,6 +1412,21 @@ class Database:
                         }
                         for dg in digests if dg.repo_id == repo.id
                     ],
+                    "showcases": [
+                        {
+                            "channel_id": sc.channel_id,
+                            "source": sc.source,
+                            "file_path": sc.file_path,
+                            "branch": sc.branch,
+                            "section": sc.section,
+                            "release_kind": sc.release_kind,
+                            "max_releases": sc.max_releases,
+                            "title": sc.title,
+                            "pinned": sc.pinned,
+                            "message_ids": sc.message_ids,
+                        }
+                        for sc in showcases if sc.repo_id == repo.id
+                    ],
                 })
 
             guilds[str(gid)] = {
@@ -1313,6 +1465,7 @@ class Database:
         counts = {
             "guilds": 0, "repos": 0, "routes": 0,
             "dashboards": 0, "watches": 0, "pr_trackers": 0, "templates": 0, "digests": 0,
+            "showcases": 0,
         }
         self._suppress_snapshot = True
         try:
@@ -1464,6 +1617,35 @@ class Database:
                         )
                         existing_digests.add(sig)
                         counts["digests"] += 1
+
+                    existing_showcases = {
+                        (
+                            sc.channel_id, sc.source, (sc.file_path or "").lower(),
+                            sc.branch or "", (sc.section or "").lower(),
+                        )
+                        for sc in await self.list_showcases(gid) if sc.repo_id == repo.id
+                    }
+                    for sc in rdata.get("showcases") or []:
+                        sig = (
+                            sc["channel_id"], sc["source"], (sc.get("file_path") or "").lower(),
+                            sc.get("branch") or "", (sc.get("section") or "").lower(),
+                        )
+                        if sig in existing_showcases:
+                            continue
+                        added = await self.add_showcase(
+                            repo, sc["channel_id"], sc["source"],
+                            file_path=sc.get("file_path"),
+                            branch=sc.get("branch"),
+                            section=sc.get("section"),
+                            release_kind=sc.get("release_kind", "stable"),
+                            max_releases=int(sc.get("max_releases", 10) or 10),
+                            title=sc.get("title"),
+                            pinned=bool(sc.get("pinned", False)),
+                        )
+                        if sc.get("message_ids"):
+                            await self.set_showcase_messages(added.id, [int(m) for m in sc["message_ids"]])
+                        existing_showcases.add(sig)
+                        counts["showcases"] += 1
         finally:
             self._suppress_snapshot = False
         await self._maybe_snapshot()

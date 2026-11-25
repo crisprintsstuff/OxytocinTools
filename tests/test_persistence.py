@@ -73,6 +73,8 @@ async def test_export_import_and_auto_snapshot(tmp_path):
                                 placeholder="OS + steps", body="## Steps\n1. ")
     await db.add_digest(repo, 16, "changelog", interval_days=7, stale_days=3,
                         mention_role_id=600, created_by=1)
+    await db.add_showcase(repo, 17, "releases", section="New Features", release_kind="stable",
+                          max_releases=5, title="What's New", pinned=True, created_by=1)
 
     assert os.path.exists(snap_path)
     exported = json.loads((tmp_path / "config-backup.json").read_text(encoding="utf-8"))
@@ -86,6 +88,7 @@ async def test_export_import_and_auto_snapshot(tmp_path):
     assert counts == {
         "guilds": 1, "repos": 1, "routes": 1,
         "dashboards": 1, "watches": 2, "pr_trackers": 1, "templates": 1, "digests": 1,
+        "showcases": 1,
     }
     assert await db2.get_admin_role(100) == 200
     assert await db2.get_issue_settings(100) == ("role", 300)
@@ -108,12 +111,18 @@ async def test_export_import_and_auto_snapshot(tmp_path):
     assert tpl is not None and tpl.title_hint == "Bug Report" and tpl.body == "## Steps\n1. "
     (dg2,) = await db2.list_digests(100)
     assert (dg2.channel_id, dg2.kind, dg2.interval_days, dg2.mention_role_id) == (16, "changelog", 7, 600)
+    (sc2,) = await db2.list_showcases(100)
+    assert (sc2.channel_id, sc2.source, sc2.section, sc2.release_kind,
+            sc2.max_releases, sc2.title, sc2.pinned) == (
+        17, "releases", "New Features", "stable", 5, "What's New", True
+    )
 
     # Importing again is idempotent (no duplicates created)
     counts_again = await db2.import_config(exported, guild_id=100)
     assert counts_again == {
         "guilds": 1, "repos": 0, "routes": 0,
         "dashboards": 0, "watches": 0, "pr_trackers": 0, "templates": 0, "digests": 0,
+        "showcases": 0,
     }
     with pytest.raises(ValueError, match="does not contain"):
         await db2.import_config(exported, guild_id=999)

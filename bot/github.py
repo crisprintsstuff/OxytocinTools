@@ -289,6 +289,14 @@ class GitHubClient:
         status, data, new_etag = await self._get(f"/repos/{owner}/{name}/issues", params, etag)
         return (None if status == 304 else data), new_etag
 
+    async def list_releases(self, owner: str, name: str, *, per_page: int = 30,
+                            etag: str | None = None) -> tuple[list[dict[str, Any]] | None, str | None]:
+        """List repository releases (newest first). Returns ``(None, etag)`` on 304."""
+        status, data, new_etag = await self._get(
+            f"/repos/{owner}/{name}/releases", {"per_page": per_page}, etag=etag,
+        )
+        return (None if status == 304 else data), new_etag
+
     async def get_issue(self, owner: str, name: str, number: int,
                         etag: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
         """Fetch one issue. Returns (None, etag) when unchanged since ``etag``."""
@@ -384,6 +392,29 @@ class GitHubClient:
         _, data, _ = await self._request("PUT", f"/repos/{owner}/{name}/contents/{path.lstrip('/')}",
                                          json=payload)
         return data
+
+    async def get_file_content(self, owner: str, name: str, path: str,
+                               ref: str | None = None,
+                               etag: str | None = None) -> tuple[str | None, str | None]:
+        """Fetch a repository text file via the Contents API. Returns ``(None, etag)`` on 304."""
+        clean_path = quote(path.lstrip("/"), safe="/")
+        params = {"ref": ref} if ref else None
+        status, data, new_etag = await self._get(
+            f"/repos/{owner}/{name}/contents/{clean_path}", params=params, etag=etag,
+        )
+        if status == 304:
+            return None, new_etag
+        if not isinstance(data, dict) or data.get("type") != "file":
+            raise GitHubError(f"Path `{path}` is not a file.")
+        raw_content = data.get("content")
+        encoding = data.get("encoding")
+        if raw_content is None or encoding != "base64":
+            raise GitHubError(f"Unsupported encoding for `{path}`: {encoding or 'none'}")
+        try:
+            text = base64.b64decode(raw_content).decode("utf-8", errors="replace")
+        except Exception as exc:
+            raise GitHubError(f"Couldn't decode `{path}`: {exc}") from exc
+        return text, new_etag
 
     async def _create_orphan_branch(self, owner: str, name: str, branch: str) -> None:
         """Create an orphan branch with a README so attachments don't copy repository history."""

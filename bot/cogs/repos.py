@@ -84,6 +84,8 @@ class Repos(commands.GroupCog, group_name="repo", group_description="Track GitHu
         if view.confirmed:
             dashboards = [d for d in await self.bot.db.list_dashboards(tracked.guild_id)
                           if d.repo_id == tracked.id]
+            showcases = [s for s in await self.bot.db.list_showcases(tracked.guild_id)
+                         if s.repo_id == tracked.id]
             await self.bot.db.remove_repo(tracked.id)
             for dash in dashboards:  # take the dashboard messages down too
                 channel = interaction.guild.get_channel(dash.channel_id)  # type: ignore[union-attr]
@@ -92,6 +94,9 @@ class Repos(commands.GroupCog, group_name="repo", group_description="Track GitHu
                         await channel.get_partial_message(dash.message_id).delete()
                     except discord.HTTPException:
                         pass
+            if hasattr(self.bot, "showcases"):
+                for sc in showcases:
+                    await self.bot.showcases.delete_messages(sc)
             await interaction.edit_original_response(
                 content=f"🗑️ Stopped tracking **{tracked.full_name}**.", view=None)
         elif view.confirmed is None:

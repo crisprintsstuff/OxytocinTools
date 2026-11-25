@@ -367,6 +367,18 @@ the GitHub App's **Checks** and **Commit statuses** permissions.
 | 🔒 `/digest remove <digest>` | Remove a scheduled digest. |
 | 🔒 `/digest run <digest>` | Post a digest immediately. |
 
+### Showcases — `/showcase`
+Edit-in-place channel boards that keep a dedicated channel (e.g. `#features` or `#whats-new`) up to date from either a repository markdown file or recent GitHub release notes. Long content automatically splits across multiple messages (up to 5) with **🔄 Refresh** and **View on GitHub** buttons at the bottom.
+
+| Command | Description |
+|---|---|
+| 🔒 `/showcase file <repo> <channel> [path] [section] [branch] [title] [pin]` | Sync from a repo markdown file (default `README.md`), optionally filtering to comma-separated heading(s) like `Features, What's New`. |
+| 🔒 `/showcase releases <repo> <channel> [section] [kind] [count] [title] [pin]` | Sync from recent GitHub releases (`stable`, `all`, or `prerelease`), optionally extracting specific heading(s) like `New Features, Features, Added`. |
+| 🔒 `/showcase edit <showcase> [...]` | Edit path, branch, section filter, release kind/count, title, or pin setting and immediately re-render. |
+| 🔒 `/showcase list` | List showcase boards, links, and any errors. |
+| 🔒 `/showcase refresh <showcase>` | Force an immediate refresh. |
+| 🔒 `/showcase remove <showcase> [delete_message]` | Delete a showcase board and, by default, its message(s). |
+
 ### Administration — `/admin`
 | Command | Description |
 |---|---|

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 from urllib.parse import quote
 from dataclasses import dataclass
@@ -446,3 +447,67 @@ class IssueTemplate:
     @property
     def full_name(self) -> str:
         return f"{self.owner}/{self.name}"
+
+
+@dataclass
+class Showcase:
+    """Edit-in-place channel showcase synced from a repo markdown file or GitHub releases."""
+    id: int
+    repo_id: int
+    guild_id: int
+    owner: str
+    name: str
+    channel_id: int
+    source: str                     # "file" | "releases"
+    file_path: str | None = None
+    branch: str | None = None
+    section: str | None = None
+    release_kind: str = "stable"    # "all" | "stable" | "prerelease"
+    max_releases: int = 10
+    title: str | None = None
+    pinned: bool = False
+    message_ids_json: str | None = None
+    last_hash: str | None = None
+    last_change: float | None = None
+    last_error: str | None = None
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.owner}/{self.name}"
+
+    @property
+    def repo_url(self) -> str:
+        return f"https://github.com/{self.full_name}"
+
+    def source_url(self, default_branch: str = "main") -> str:
+        if self.source == "releases":
+            return f"{self.repo_url}/releases"
+        ref = quote(self.branch or default_branch, safe="/")
+        path = quote((self.file_path or "").lstrip("/"), safe="/")
+        return f"{self.repo_url}/blob/{ref}/{path}" if path else self.repo_url
+
+    @property
+    def message_ids(self) -> list[int]:
+        if not self.message_ids_json:
+            return []
+        try:
+            raw = json.loads(self.message_ids_json)
+        except (TypeError, ValueError):
+            return []
+        return [int(mid) for mid in raw] if isinstance(raw, list) else []
+
+    def describe(self) -> str:
+        if self.source == "file":
+            label = f"`{self.file_path}`"
+            if self.branch:
+                label += f" (`{self.branch}`)"
+        else:
+            label = f"Releases ({self.release_kind}, last {self.max_releases})"
+        if self.section:
+            label += f" § `{self.section}`"
+        parts = [f"**{self.full_name}** → <#{self.channel_id}>", label]
+        if self.title:
+            parts.append(f'"{self.title}"')
+        if self.pinned:
+            parts.append("📌")
+        return ", ".join(parts)

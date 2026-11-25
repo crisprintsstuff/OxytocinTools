@@ -104,6 +104,7 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
         watches = await bot.db.list_watches(interaction.guild.id)
         trackers = await bot.db.list_pr_trackers(interaction.guild.id)
         digests = await bot.db.list_digests(interaction.guild.id)
+        showcases = await bot.db.list_showcases(interaction.guild.id)
         role_id = await bot.db.get_admin_role(interaction.guild.id)
         alert_ch = await bot.db.get_alert_channel(interaction.guild.id)
 
@@ -112,7 +113,8 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
                         value=f"{len(repos)} repo(s)\n{sum(r.enabled for r in routes)} active / "
                               f"{len(routes)} route(s)\n"
                               f"{len(dashboards)} dashboard(s) · {len(watches)} watch(es) · "
-                              f"{len(trackers)} PR tracker(s) · {len(digests)} digest(s)\n"
+                              f"{len(trackers)} PR tracker(s) · {len(digests)} digest(s) · "
+                              f"{len(showcases)} showcase(s)\n"
                               f"Admin role: {f'<@&{role_id}>' if role_id else 'none'} · "
                               f"Alert channel: {f'<#{alert_ch}>' if alert_ch else 'none'}")
         last = discord.utils.format_dt(_dt(poller.last_run), "R") \
@@ -175,6 +177,9 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
         for dg in digests:
             if dg.last_error:
                 problems.append(f"Digest `#{dg.id}` ({dg.full_name}): {dg.last_error}")
+        for sc in showcases:
+            if sc.last_error:
+                problems.append(f"Showcase `#{sc.id}` ({sc.full_name}): {sc.last_error}")
         if problems:
             embed.add_field(name="⚠️ Problems", value="\n".join(problems)[:1024], inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True,
@@ -198,11 +203,12 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
         dashes = sum(len(r.get("dashboards", [])) for r in repos)
         watches = sum(len(r.get("watches", [])) for r in repos)
         trackers = sum(len(r.get("pr_trackers", [])) for r in repos)
+        showcases = sum(len(r.get("showcases", [])) for r in repos)
         file = discord.File(io.BytesIO(raw), filename=f"oxytocintools-{interaction.guild.id}.json")
         await interaction.response.send_message(
             f"📦 Exported **{len(repos)}** repo(s), **{routes}** route(s), "
-            f"**{dashes}** dashboard(s), **{watches}** watch(es), and "
-            f"**{trackers}** PR tracker(s).",
+            f"**{dashes}** dashboard(s), **{watches}** watch(es), "
+            f"**{trackers}** PR tracker(s), and **{showcases}** showcase(s).",
             file=file,
             ephemeral=True,
         )
@@ -227,7 +233,8 @@ class Admin(commands.GroupCog, group_name="admin", group_description="Bot admini
         await interaction.followup.send(
             f"✅ Imported **{counts['repos']}** repo(s), **{counts['routes']}** route(s), "
             f"**{counts['dashboards']}** dashboard(s), **{counts['watches']}** watch(es), "
-            f"and **{counts['pr_trackers']}** PR tracker(s) (existing entries skipped).",
+            f"**{counts['pr_trackers']}** PR tracker(s), and **{counts['showcases']}** showcase(s) "
+            f"(existing entries skipped).",
             ephemeral=True,
         )
 
