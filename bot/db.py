@@ -14,6 +14,8 @@ from .models import (
     Digest,
     Filing,
     IssueTemplate,
+    NotifyPanel,
+    NotifyPanelItem,
     PRCard,
     PRTracker,
     Repo,
@@ -240,6 +242,31 @@ CREATE TABLE IF NOT EXISTS http_cache (
     etag       TEXT,
     body_json  TEXT NOT NULL,
     updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notify_panels (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id    INTEGER NOT NULL,
+    channel_id  INTEGER NOT NULL,
+    message_id  INTEGER,
+    title       TEXT    NOT NULL DEFAULT '🔔 Notification Roles',
+    description TEXT    NOT NULL DEFAULT 'Click a button below to opt in or out of notification pings.',
+    pinned      INTEGER NOT NULL DEFAULT 0,
+    created_by  INTEGER,
+    created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS notify_panels_guild ON notify_panels (guild_id);
+CREATE INDEX IF NOT EXISTS notify_panels_message ON notify_panels (message_id);
+
+CREATE TABLE IF NOT EXISTS notify_panel_items (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    panel_id    INTEGER NOT NULL REFERENCES notify_panels(id) ON DELETE CASCADE,
+    role_id     INTEGER NOT NULL,
+    label       TEXT    NOT NULL,
+    emoji       TEXT,
+    description TEXT,
+    position    INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(panel_id, role_id)
 );
 """
 
@@ -1309,16 +1336,211 @@ class Database:
             await self._maybe_snapshot()
         return cur.rowcount
 
+    # ----------------------------------------------------------- notify panels
+    _NOTIFY_PANEL_SELECT = (
+        "SELECT id, guild_id, channel_id, message_id, title, description, pinned "
+        "FROM notify_panels"
+    )
+
+    async def _load_panel_items(self, panel_ids: list[int]) -> dict[int, list[NotifyPanelItem]]:
+        if not panel_ids:
+            return {}
+        placeholders = ",".join("?" for _ in panel_ids)
+        sql = (
+            f"SELECT panel_id, role_id, label, emoji, description, position "
+            f"FROM notify_panel_items WHERE panel_id IN ({placeholders}) "
+            f"ORDER BY position, id"
+        )
+        items_by_panel: dict[int, list[NotifyPanelItem]] = {pid: [] for pid in panel_ids}
+        async with self.conn.execute(sql, panel_ids) as cur:
+            for row in await cur.fetchall():
+                pid, role_id, label, emoji, desc, pos = row
+                items_by_panel.setdefault(pid, []).append(
+                    NotifyPanelItem(
+                        role_id=role_id,
+                        label=label,
+                        emoji=emoji,
+                        description=desc,
+                        position=pos,
+                    )
+                )
+        return items_by_panel
+
+    @staticmethod
+    def _notify_panel(row: Iterable[Any], items: list[NotifyPanelItem] | None = None) -> NotifyPanel:
+        pid, guild_id, channel_id, message_id, title, description, pinned = row
+        return NotifyPanel(
+            id=pid,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            message_id=message_id,
+            title=title,
+            description=description,
+            pinned=bool(pinned),
+            items=items if items is not None else [],
+        )
+
+    async def add_notify_panel(
+        self,
+        guild_id: int,
+        channel_id: int,
+        *,
+        title: str = "🔔 Notification Roles",
+        description: str = "Click a button below to opt in or out of notification pings.",
+        pinned: bool = False,
+        created_by: int | None = None,
+    ) -> NotifyPanel:
+        cur = await self.conn.execute(
+            "INSERT INTO notify_panels (guild_id, channel_id, title, description, pinned, created_by) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (guild_id, channel_id, title, description, int(pinned), created_by),
+        )
+        await self.conn.commit()
+        panel = await self.get_notify_panel(cur.lastrowid)
+        assert panel is not None
+        await self._maybe_snapshot()
+        return panel
+
+    async def get_notify_panel(self, panel_id: int, guild_id: int | None = None) -> NotifyPanel | None:
+        sql, params = self._NOTIFY_PANEL_SELECT + " WHERE id = ?", [panel_id]
+        if guild_id is not None:
+            sql += " AND guild_id = ?"
+            params.append(guild_id)
+        async with self.conn.execute(sql, params) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        items_map = await self._load_panel_items([row[0]])
+        return self._notify_panel(row, items_map.get(row[0], []))
+
+    async def list_notify_panels(self, guild_id: int | None = None) -> list[NotifyPanel]:
+        sql, params = self._NOTIFY_PANEL_SELECT, []
+        if guild_id is not None:
+            sql += " WHERE guild_id = ?"
+            params.append(guild_id)
+        async with self.conn.execute(sql + " ORDER BY id", params) as cur:
+            rows = await cur.fetchall()
+        items_map = await self._load_panel_items([r[0] for r in rows])
+        return [self._notify_panel(r, items_map.get(r[0], [])) for r in rows]
+
+    async def find_notify_panel_by_message(self, message_id: int) -> NotifyPanel | None:
+        async with self.conn.execute(
+            self._NOTIFY_PANEL_SELECT + " WHERE message_id = ?", (message_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        items_map = await self._load_panel_items([row[0]])
+        return self._notify_panel(row, items_map.get(row[0], []))
+
+    async def set_notify_panel_message(self, panel_id: int, message_id: int | None) -> None:
+        await self.conn.execute(
+            "UPDATE notify_panels SET message_id = ? WHERE id = ?",
+            (message_id, panel_id),
+        )
+        await self.conn.commit()
+
+    async def update_notify_panel(
+        self,
+        panel_id: int,
+        guild_id: int,
+        *,
+        title: str,
+        description: str,
+        pinned: bool,
+    ) -> NotifyPanel | None:
+        await self.conn.execute(
+            "UPDATE notify_panels SET title = ?, description = ?, pinned = ? "
+            "WHERE id = ? AND guild_id = ?",
+            (title, description, int(pinned), panel_id, guild_id),
+        )
+        await self.conn.commit()
+        await self._maybe_snapshot()
+        return await self.get_notify_panel(panel_id, guild_id)
+
+    async def remove_notify_panel(self, panel_id: int) -> bool:
+        cur = await self.conn.execute("DELETE FROM notify_panels WHERE id = ?", (panel_id,))
+        await self.conn.commit()
+        if cur.rowcount:
+            await self._maybe_snapshot()
+        return cur.rowcount > 0
+
+    async def remove_notify_panels_for_channel(self, channel_id: int) -> int:
+        cur = await self.conn.execute("DELETE FROM notify_panels WHERE channel_id = ?", (channel_id,))
+        await self.conn.commit()
+        if cur.rowcount:
+            await self._maybe_snapshot()
+        return cur.rowcount
+
+    async def add_notify_panel_item(
+        self,
+        panel_id: int,
+        role_id: int,
+        label: str,
+        *,
+        emoji: str | None = None,
+        description: str | None = None,
+    ) -> NotifyPanel | None:
+        async with self.conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM notify_panel_items WHERE panel_id = ?",
+            (panel_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        next_pos = int(row[0]) if row else 0
+        await self.conn.execute(
+            "INSERT INTO notify_panel_items (panel_id, role_id, label, emoji, description, position) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(panel_id, role_id) DO UPDATE SET "
+            "label = excluded.label, emoji = excluded.emoji, description = excluded.description",
+            (panel_id, role_id, label, emoji, description, next_pos),
+        )
+        await self.conn.commit()
+        panel = await self.get_notify_panel(panel_id)
+        if panel is not None:
+            await self._maybe_snapshot()
+        return panel
+
+    async def remove_notify_panel_item(self, panel_id: int, role_id: int) -> bool:
+        cur = await self.conn.execute(
+            "DELETE FROM notify_panel_items WHERE panel_id = ? AND role_id = ?",
+            (panel_id, role_id),
+        )
+        await self.conn.commit()
+        if cur.rowcount:
+            await self._maybe_snapshot()
+        return cur.rowcount > 0
+
+    async def remove_notify_role_across_guild(self, guild_id: int, role_id: int) -> list[int]:
+        async with self.conn.execute(
+            "SELECT DISTINCT i.panel_id FROM notify_panel_items i "
+            "JOIN notify_panels p ON p.id = i.panel_id "
+            "WHERE p.guild_id = ? AND i.role_id = ?",
+            (guild_id, role_id),
+        ) as cur:
+            panel_ids = [int(row[0]) for row in await cur.fetchall()]
+        if not panel_ids:
+            return []
+        placeholders = ",".join("?" for _ in panel_ids)
+        await self.conn.execute(
+            f"DELETE FROM notify_panel_items WHERE role_id = ? AND panel_id IN ({placeholders})",
+            [role_id, *panel_ids],
+        )
+        await self.conn.commit()
+        await self._maybe_snapshot()
+        return panel_ids
+
     # ----------------------------------------------------------- config backup
     async def list_guild_ids(self) -> list[int]:
         async with self.conn.execute(
-            "SELECT guild_id FROM guild_settings UNION SELECT guild_id FROM repos"
+            "SELECT guild_id FROM guild_settings UNION SELECT guild_id FROM repos "
+            "UNION SELECT guild_id FROM notify_panels"
         ) as cur:
             return sorted(row[0] for row in await cur.fetchall())
 
     async def has_any_config(self) -> bool:
         async with self.conn.execute(
-            "SELECT EXISTS(SELECT 1 FROM repos) OR EXISTS(SELECT 1 FROM guild_settings)"
+            "SELECT EXISTS(SELECT 1 FROM repos) OR EXISTS(SELECT 1 FROM guild_settings) "
+            "OR EXISTS(SELECT 1 FROM notify_panels)"
         ) as cur:
             row = await cur.fetchone()
         return bool(row and row[0])
@@ -1337,6 +1559,7 @@ class Database:
             templates = await self.list_issue_templates(gid)
             digests = await self.list_digests(gid)
             showcases = await self.list_showcases(gid)
+            notify_panels = await self.list_notify_panels(gid)
 
             repo_entries: list[dict[str, Any]] = []
             for repo in repos:
@@ -1440,6 +1663,25 @@ class Database:
                     "alert_channel_id": await self.get_alert_channel(gid),
                 },
                 "repos": repo_entries,
+                "notify_panels": [
+                    {
+                        "channel_id": p.channel_id,
+                        "message_id": p.message_id,
+                        "title": p.title,
+                        "description": p.description,
+                        "pinned": p.pinned,
+                        "items": [
+                            {
+                                "role_id": it.role_id,
+                                "label": it.label,
+                                "emoji": it.emoji,
+                                "description": it.description,
+                            }
+                            for it in p.items
+                        ],
+                    }
+                    for p in notify_panels
+                ],
             }
         return {
             "version": 1,
@@ -1465,7 +1707,7 @@ class Database:
         counts = {
             "guilds": 0, "repos": 0, "routes": 0,
             "dashboards": 0, "watches": 0, "pr_trackers": 0, "templates": 0, "digests": 0,
-            "showcases": 0,
+            "showcases": 0, "notify_panels": 0,
         }
         self._suppress_snapshot = True
         try:
@@ -1646,6 +1888,44 @@ class Database:
                             await self.set_showcase_messages(added.id, [int(m) for m in sc["message_ids"]])
                         existing_showcases.add(sig)
                         counts["showcases"] += 1
+
+                existing_panels = await self.list_notify_panels(gid)
+                existing_panel_sigs = {
+                    (p.channel_id, p.message_id)
+                    if p.message_id is not None
+                    else (p.channel_id, p.title.lower())
+                    for p in existing_panels
+                }
+                for npd in gdata.get("notify_panels") or []:
+                    mid = npd.get("message_id")
+                    title = npd.get("title") or "🔔 Notification Roles"
+                    sig = (
+                        (npd["channel_id"], int(mid))
+                        if mid is not None
+                        else (npd["channel_id"], title.lower())
+                    )
+                    if sig in existing_panel_sigs:
+                        continue
+                    panel = await self.add_notify_panel(
+                        gid,
+                        npd["channel_id"],
+                        title=title,
+                        description=npd.get("description")
+                        or "Click a button below to opt in or out of notification pings.",
+                        pinned=bool(npd.get("pinned", False)),
+                    )
+                    if mid is not None:
+                        await self.set_notify_panel_message(panel.id, int(mid))
+                    for item in npd.get("items") or []:
+                        await self.add_notify_panel_item(
+                            panel.id,
+                            int(item["role_id"]),
+                            item["label"],
+                            emoji=item.get("emoji"),
+                            description=item.get("description"),
+                        )
+                    existing_panel_sigs.add(sig)
+                    counts["notify_panels"] += 1
         finally:
             self._suppress_snapshot = False
         await self._maybe_snapshot()

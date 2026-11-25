@@ -15,18 +15,19 @@ This guide covers installing, configuring, running, backing up, monitoring, and 
 3. Authorize the bot into your server (replace `CLIENT_ID` with your Application ID):
 
    ```
-   https://discord.com/oauth2/authorize?client_id=CLIENT_ID&scope=bot+applications.commands&permissions=326417738816
+   https://discord.com/oauth2/authorize?client_id=CLIENT_ID&scope=bot+applications.commands&permissions=326686174272
    ```
 
-   Permission integer `326417738816` grants:
+   Permission integer `326686174272` grants:
 
    | Permission | Used by |
    |---|---|
    | View Channels & Read Message History | All channel posting, watches, and startup cleanup |
-   | Send Messages & Embed Links | Routes, dashboards, PR cards, digests, showcases, issue embeds |
+   | Send Messages & Embed Links | Routes, dashboards, PR cards, digests, showcases, notify panels, issue embeds |
    | Add Reactions | Watch acknowledgement reactions (`✅`, `💬`) |
-   | Mention `@everyone`, `@here`, and All Roles | Role pings on routes, digests, and issue closure notices |
-   | Manage Messages | Pinning `/dashboard create ... pin:True` and `/showcase ... pin:True` messages |
+   | Mention `@everyone`, `@here`, and All Roles | Role pings on routes, PR cards, digests, and issue closure notices |
+   | Manage Roles | Self-assignable notification role panels (`/notify`); bot's highest role must sit above ping roles |
+   | Manage Messages | Pinning `/dashboard`, `/showcase`, and `/notify` messages |
    | Create Public Threads, Send Messages in Threads, Manage Threads | PR card timeline threads (`/pr track`) and forum watch thread sync/closure (`/watch forum`) |
 
 ---

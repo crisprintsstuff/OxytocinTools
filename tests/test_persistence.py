@@ -75,6 +75,9 @@ async def test_export_import_and_auto_snapshot(tmp_path):
                         mention_role_id=600, created_by=1)
     await db.add_showcase(repo, 17, "releases", section="New Features", release_kind="stable",
                           max_releases=5, title="What's New", pinned=True, created_by=1)
+    panel = await db.add_notify_panel(100, 18, title="Pings", description="Opt in", pinned=True, created_by=1)
+    await db.set_notify_panel_message(panel.id, 888)
+    await db.add_notify_panel_item(panel.id, 700, "Releases", emoji="🚀", description="New builds")
 
     assert os.path.exists(snap_path)
     exported = json.loads((tmp_path / "config-backup.json").read_text(encoding="utf-8"))
@@ -88,7 +91,7 @@ async def test_export_import_and_auto_snapshot(tmp_path):
     assert counts == {
         "guilds": 1, "repos": 1, "routes": 1,
         "dashboards": 1, "watches": 2, "pr_trackers": 1, "templates": 1, "digests": 1,
-        "showcases": 1,
+        "showcases": 1, "notify_panels": 1,
     }
     assert await db2.get_admin_role(100) == 200
     assert await db2.get_issue_settings(100) == ("role", 300)
@@ -116,13 +119,21 @@ async def test_export_import_and_auto_snapshot(tmp_path):
             sc2.max_releases, sc2.title, sc2.pinned) == (
         17, "releases", "New Features", "stable", 5, "What's New", True
     )
+    (np2,) = await db2.list_notify_panels(100)
+    assert (np2.channel_id, np2.message_id, np2.title, np2.description, np2.pinned) == (
+        18, 888, "Pings", "Opt in", True
+    )
+    assert len(np2.items) == 1
+    assert (np2.items[0].role_id, np2.items[0].label, np2.items[0].emoji, np2.items[0].description) == (
+        700, "Releases", "🚀", "New builds"
+    )
 
     # Importing again is idempotent (no duplicates created)
     counts_again = await db2.import_config(exported, guild_id=100)
     assert counts_again == {
         "guilds": 1, "repos": 0, "routes": 0,
         "dashboards": 0, "watches": 0, "pr_trackers": 0, "templates": 0, "digests": 0,
-        "showcases": 0,
+        "showcases": 0, "notify_panels": 0,
     }
     with pytest.raises(ValueError, match="does not contain"):
         await db2.import_config(exported, guild_id=999)

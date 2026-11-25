@@ -24,7 +24,7 @@ pre-releases to `#beta-testers`, `v2.*` tags to `#v2`, and so on.
 Full guides live in **[`docs/`](docs/README.md)**:
 
 - **[Bot Management & Operations Guide](docs/management.md)** — Discord & GitHub App setup, `.env` variables, `systemd` / Docker deployment, SQLite WAL & backups, webhooks, alerts, and troubleshooting.
-- **Per-command Guides:** [`/repo`](docs/commands/repo.md) · [`/route`](docs/commands/route.md) · [`/issue`](docs/commands/issue.md) · [`/watch`](docs/commands/watch.md) · [`/pr`](docs/commands/pr.md) · [`/dashboard`](docs/commands/dashboard.md) · [`/digest`](docs/commands/digest.md) · [`/showcase`](docs/commands/showcase.md) · [`/admin`](docs/commands/admin.md)
+- **Per-command Guides:** [`/repo`](docs/commands/repo.md) · [`/route`](docs/commands/route.md) · [`/issue`](docs/commands/issue.md) · [`/watch`](docs/commands/watch.md) · [`/pr`](docs/commands/pr.md) · [`/dashboard`](docs/commands/dashboard.md) · [`/digest`](docs/commands/digest.md) · [`/showcase`](docs/commands/showcase.md) · [`/notify`](docs/commands/notify.md) · [`/admin`](docs/commands/admin.md)
 
 ## Setup
 
@@ -37,12 +37,12 @@ Full guides live in **[`docs/`](docs/README.md)**:
 3. Invite the bot. Replace `CLIENT_ID` with the application ID:
 
    ```
-   https://discord.com/oauth2/authorize?client_id=CLIENT_ID&scope=bot+applications.commands&permissions=326417738816
+   https://discord.com/oauth2/authorize?client_id=CLIENT_ID&scope=bot+applications.commands&permissions=326686174272
    ```
 
    That grants View Channels, Send Messages, Embed Links, Add Reactions, Read Message History,
-   Mention All Roles, Manage Messages (pinning dashboards), Create Public Threads (PR card
-   threads), and Send Messages in Threads and Manage Threads (replying in and closing threads).
+   Mention All Roles, Manage Roles (`/notify` panels), Manage Messages (pinning panels/dashboards),
+   Create Public Threads (PR card threads), and Send Messages in Threads and Manage Threads (replying in and closing threads).
    Already invited the bot with fewer permissions? Open this link again and authorize it to
    update them.
 
@@ -385,6 +385,18 @@ Edit-in-place channel boards that keep a dedicated channel (e.g. `#features` or 
 | 🔒 `/showcase list` | List showcase boards, links, and any errors. |
 | 🔒 `/showcase refresh <showcase>` | Force an immediate refresh. |
 | 🔒 `/showcase remove <showcase> [delete_message]` | Delete a showcase board and, by default, its message(s). |
+
+### Notification Role Panels — `/notify`
+Post a self-assignable role button board so members can opt in or out of pings (e.g. `@Releases`, `@PR Updates`) that your `/route`, `/pr`, and `/digest` rules mention.
+
+| Command | Description |
+|---|---|
+| 🔒 `/notify create <channel> [title] [description] [pin]` | Post a self-assignable notification role panel. |
+| 🔒 `/notify add <panel> <role> [label] [emoji] [description]` | Add or update a role toggle button on the panel. |
+| 🔒 `/notify remove-role <panel> <role>` | Remove a role button from the panel. |
+| 🔒 `/notify edit <panel> [title] [description] [pin]` | Update the panel title, description, or pin setting. |
+| 🔒 `/notify list` | List notification panels and configured roles. |
+| 🔒 `/notify delete <panel> [delete_message]` | Delete a panel (and, by default, its message). |
 
 ### Administration — `/admin`
 | Command | Description |

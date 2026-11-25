@@ -4,7 +4,7 @@ import fnmatch
 import json
 import re
 from urllib.parse import quote
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 EVENT_TYPES = ("releases", "commits", "issues", "pulls", "workflows")
@@ -508,6 +508,35 @@ class Showcase:
         parts = [f"**{self.full_name}** → <#{self.channel_id}>", label]
         if self.title:
             parts.append(f'"{self.title}"')
+        if self.pinned:
+            parts.append("📌")
+        return ", ".join(parts)
+
+
+@dataclass
+class NotifyPanelItem:
+    """One self-assignable notification role entry inside a ``NotifyPanel``."""
+    role_id: int
+    label: str
+    emoji: str | None = None
+    description: str | None = None
+    position: int = 0
+
+
+@dataclass
+class NotifyPanel:
+    """An edit-in-place button panel where members toggle notification roles."""
+    id: int
+    guild_id: int
+    channel_id: int
+    message_id: int | None = None
+    title: str = "🔔 Notification Roles"
+    description: str = "Click a button below to opt in or out of notification pings."
+    pinned: bool = False
+    items: list[NotifyPanelItem] = field(default_factory=list)
+
+    def describe(self) -> str:
+        parts = [f'"{self.title}" in <#{self.channel_id}>', f"{len(self.items)} role(s)"]
         if self.pinned:
             parts.append("📌")
         return ", ".join(parts)

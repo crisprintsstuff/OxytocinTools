@@ -20,6 +20,7 @@ from .digests import DigestManager
 from .embeds import ORANGE, build_embeds, truncate
 from .github import GitHubClient, GitHubError
 from .models import Route
+from .notify import NotifyPanelManager, NotifyRoleButton
 from .poller import Poller
 from .prcards import PRCardManager, RefreshPRCardButton
 from .showcases import RefreshShowcaseButton, ShowcaseManager
@@ -38,7 +39,7 @@ ALERT_COOLDOWN = 6 * 3600
 
 EXTENSIONS = ("bot.cogs.repos", "bot.cogs.routes", "bot.cogs.admin", "bot.cogs.issues",
               "bot.cogs.dashboards", "bot.cogs.watches", "bot.cogs.prs", "bot.cogs.digests",
-              "bot.cogs.showcases")
+              "bot.cogs.showcases", "bot.cogs.notify")
 
 
 class TrackerBot(commands.Bot):
@@ -50,6 +51,7 @@ class TrackerBot(commands.Bot):
     prcards: PRCardManager
     digests: DigestManager
     showcases: ShowcaseManager
+    notify_panels: NotifyPanelManager
     webhook: WebhookServer | None
 
     def __init__(self, config: Config, *, message_content: bool = True):
@@ -125,6 +127,7 @@ class TrackerBot(commands.Bot):
         self.prcards = PRCardManager(self)
         self.digests = DigestManager(self)
         self.showcases = ShowcaseManager(self)
+        self.notify_panels = NotifyPanelManager(self)
         self.poller = Poller(self.db, self.github, self.deliver,
                              interval=self.config.poll_interval,
                              wait_until_ready=self.wait_until_ready,
@@ -134,7 +137,8 @@ class TrackerBot(commands.Bot):
         # Dashboard, filing & PR card buttons keep working after restarts.
         self.add_dynamic_items(
             ReportButton, RefreshButton, RefreshPRCardButton, RefreshShowcaseButton,
-            CloseFiledButton, CompleteFiledButton, LabelFiledButton, CommentFiledButton,
+            NotifyRoleButton, CloseFiledButton, CompleteFiledButton, LabelFiledButton,
+            CommentFiledButton,
         )
         for ext in EXTENSIONS:
             await self.load_extension(ext)
@@ -206,6 +210,7 @@ class TrackerBot(commands.Bot):
         removed += await self.db.remove_pr_trackers_for_channel(channel.id)
         removed += await self.db.remove_digests_for_channel(channel.id)
         removed += await self.db.remove_showcases_for_channel(channel.id)
+        removed += await self.db.remove_notify_panels_for_channel(channel.id)
         if getattr(channel, "guild", None) and await self.db.get_alert_channel(channel.guild.id) == channel.id:
             await self.db.set_alert_channel(channel.guild.id, None)
             removed += 1
@@ -276,11 +281,16 @@ class TrackerBot(commands.Bot):
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
         await self.dashboards.message_deleted(payload.message_id)
         await self.showcases.message_deleted(payload.message_id)
+        await self.notify_panels.message_deleted(payload.message_id)
 
     async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
         for message_id in payload.message_ids:
             await self.dashboards.message_deleted(message_id)
             await self.showcases.message_deleted(message_id)
+            await self.notify_panels.message_deleted(message_id)
+
+    async def on_guild_role_delete(self, role: discord.Role) -> None:
+        await self.notify_panels.role_deleted(role.guild.id, role.id)
 
     # ------------------------------------------------------------------ delivery
     async def deliver(self, route: Route, stream: str, items: list[dict[str, Any]]) -> None:

@@ -20,6 +20,7 @@ Commands marked with 🔒 require bot admin permissions (**Manage Server** / **A
 | `/dashboard` | Maintain edit-in-place issue and PR overview dashboards with Report & Refresh buttons | [dashboard.md](commands/dashboard.md) |
 | `/digest` | Schedule periodic changelogs and stale pull request review nudges | [digest.md](commands/digest.md) |
 | `/showcase` | Keep feature/changelog channels synced in-place from repo markdown files or release notes | [showcase.md](commands/showcase.md) |
+| `/notify` | Self-assignable notification role button boards so members opt in/out of pings | [notify.md](commands/notify.md) |
 | `/admin` | Roles, issue access policy, status diagnostics, config export/import, chat features, alerts | [admin.md](commands/admin.md) |
 
 ---
